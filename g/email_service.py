@@ -23,6 +23,12 @@ class EmailService:
     def _extract_email(payload):
         if not payload:
             return None
+        if isinstance(payload, list):
+            for item in payload:
+                email = EmailService._extract_email(item)
+                if email:
+                    return email
+            return None
         if isinstance(payload, dict):
             for key in ("email", "address", "mailbox"):
                 value = payload.get(key)
@@ -30,11 +36,27 @@ class EmailService:
                     return value
             for key in ("data", "result"):
                 nested = payload.get(key)
-                if isinstance(nested, dict):
+                if isinstance(nested, (dict, list)):
                     email = EmailService._extract_email(nested)
                     if email:
                         return email
         return None
+
+    @staticmethod
+    def _extract_email_items(payload):
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+
+        for key in ("data", "result", "messages", "items"):
+            nested = payload.get(key)
+            if isinstance(nested, list):
+                return [item for item in nested if isinstance(item, dict)]
+            if isinstance(nested, dict):
+                return [nested]
+
+        return [payload]
 
     @staticmethod
     def _extract_verification_code(email_item):
@@ -115,7 +137,7 @@ class EmailService:
                         continue
 
                     payload = res.json()
-                    emails = payload if isinstance(payload, list) else payload.get("data", [])
+                    emails = self._extract_email_items(payload)
                     if not emails:
                         continue
 
