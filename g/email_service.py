@@ -1,66 +1,182 @@
-"""邮箱服务类 - 适配 freemail API"""
+"""邮箱服务类 - 适配 moemail API"""
 import os
 import time
 import requests
+import re
 from dotenv import load_dotenv
 
 
 class EmailService:
     def __init__(self):
         load_dotenv()
-        self.worker_domain = os.getenv("WORKER_DOMAIN")
-        self.freemail_token = os.getenv("FREEMAIL_TOKEN")
-        if not all([self.worker_domain, self.freemail_token]):
-            raise ValueError("Missing: WORKER_DOMAIN or FREEMAIL_TOKEN")
-        self.base_url = f"https://{self.worker_domain}"
-        self.headers = {"Authorization": f"Bearer {self.freemail_token}"}
+        self.moemail_api_url = os.getenv("MOEMAIL_API_URL", "https://api.moemail.app")
+        self.moemail_api_key = os.getenv("MOEMAIL_API_KEY")
+        if not self.moemail_api_key:
+            raise ValueError("Missing: MOEMAIL_API_KEY")
+        self.base_url = self.moemail_api_url.rstrip("/")
+        self.headers = {
+            "Authorization": f"Bearer {self.moemail_api_key}",
+            "Content-Type": "application/json",
+        }
+
+    @staticmethod
+    def _extract_email(payload):
+        if not payload:
+            return None
+        if isinstance(payload, list):
+            for item in payload:
+                email = EmailService._extract_email(item)
+                if email:
+                    return email
+            return None
+        if isinstance(payload, dict):
+            for key in ("email", "address", "mailbox"):
+                value = payload.get(key)
+                if isinstance(value, str) and "@" in value:
+                    return value
+            for key in ("data", "result"):
+                nested = payload.get(key)
+                if isinstance(nested, (dict, list)):
+                    email = EmailService._extract_email(nested)
+                    if email:
+                        return email
+        return None
+
+    @staticmethod
+    def _extract_email_items(payload):
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+
+        for key in ("data", "result", "messages", "items"):
+            nested = payload.get(key)
+            if isinstance(nested, list):
+                return [item for item in nested if isinstance(item, dict)]
+            if isinstance(nested, dict):
+                return [nested]
+
+        return [payload]
+
+    @staticmethod
+    def _extract_verification_code(email_item):
+        if not isinstance(email_item, dict):
+            return None
+
+        for key in ("verification_code", "verificationCode", "code"):
+            value = email_item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+
+        for key in ("text", "html", "subject", "content", "body"):
+            value = email_item.get(key)
+            if not isinstance(value, str):
+                continue
+            code = re.search(r"\b(\d{4,8})\b", value)
+            if code:
+                return code.group(1)
+
+        return None
 
     def create_email(self):
-        """创建临时邮箱 GET /api/generate"""
-        try:
-            res = requests.get(
-                f"{self.base_url}/api/generate",
-                headers=self.headers,
-                timeout=10
-            )
-            if res.status_code == 200:
-                email = res.json().get("email")
-                return email, email  # 兼容原接口 (jwt, email)
-            print(f"[-] 创建邮箱失败: {res.status_code} - {res.text}")
-            return None, None
-        except Exception as e:
-            print(f"[-] 创建邮箱失败: {e}")
-            return None, None
+        """创建临时邮箱"""
+        endpoints = [
+            ("POST", "/api/emails/generate", {}),
+            ("POST", "/api/email/new", {}),
+            ("GET", "/api/generate", None),
+        ]
+
+        for method, path, json_data in endpoints:
+            try:
+                if method == "POST":
+                    res = requests.post(
+                        f"{self.base_url}{path}",
+                        headers=self.headers,
+                        json=json_data,
+                        timeout=10,
+                    )
+                else:
+                    res = requests.get(
+                        f"{self.base_url}{path}",
+                        headers=self.headers,
+                        timeout=10,
+                    )
+
+                if res.status_code == 200:
+                    email = self._extract_email(res.json())
+                    if email:
+                        return email, email  # 兼容原接口 (jwt, email)
+            except Exception:
+                continue
+
+        print("[-] 创建邮箱失败: moemail API 不可用或返回格式不匹配")
+        return None, None
 
     def fetch_verification_code(self, email, max_attempts=30):
-        """轮询获取验证码 GET /api/emails?mailbox=xxx"""
+        """轮询获取验证码"""
+        endpoints = [
+            ("GET", "/api/emails", {"mailbox": email}),
+            ("GET", "/api/emails/messages", {"email": email}),
+            ("GET", "/api/email/messages", {"address": email}),
+        ]
+
         for _ in range(max_attempts):
-            try:
-                res = requests.get(
-                    f"{self.base_url}/api/emails",
-                    params={"mailbox": email},
-                    headers=self.headers,
-                    timeout=10
-                )
-                if res.status_code == 200:
-                    emails = res.json()
-                    if emails and emails[0].get("verification_code"):
-                        code = emails[0]["verification_code"]
+            for method, path, params in endpoints:
+                try:
+                    if method != "GET":
+                        continue
+
+                    res = requests.get(
+                        f"{self.base_url}{path}",
+                        params=params,
+                        headers=self.headers,
+                        timeout=10,
+                    )
+
+                    if res.status_code != 200:
+                        continue
+
+                    payload = res.json()
+                    emails = self._extract_email_items(payload)
+                    if not emails:
+                        continue
+
+                    code = self._extract_verification_code(emails[0])
+                    if code:
                         return code.replace("-", "")
-            except:
-                pass
+                except Exception:
+                    continue
+
             time.sleep(1)
+
         return None
 
     def delete_email(self, address):
-        """删除邮箱 DELETE /api/mailboxes?address=xxx"""
-        try:
-            res = requests.delete(
-                f"{self.base_url}/api/mailboxes",
-                params={"address": address},
-                headers=self.headers,
-                timeout=10
-            )
-            return res.status_code == 200 and res.json().get("success")
-        except:
-            return False
+        """删除邮箱"""
+        endpoints = [
+            ("DELETE", "/api/emails", {"email": address}),
+            ("DELETE", "/api/email", {"address": address}),
+            ("DELETE", "/api/mailboxes", {"address": address}),
+        ]
+
+        for method, path, params in endpoints:
+            try:
+                if method != "DELETE":
+                    continue
+
+                res = requests.delete(
+                    f"{self.base_url}{path}",
+                    params=params,
+                    headers=self.headers,
+                    timeout=10,
+                )
+                if res.status_code == 200:
+                    data = res.json() if res.text else {}
+                    if isinstance(data, dict):
+                        if data.get("success") is False:
+                            continue
+                    return True
+            except Exception:
+                continue
+
+        return False
