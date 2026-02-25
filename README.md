@@ -20,7 +20,7 @@
 | `api_solver.py` | Turnstile 验证码解决器 |
 | `browser_configs.py` | 浏览器指纹配置 |
 | `db_results.py` | 验证结果存储 |
-| `g/email_service.py` | 临时邮箱服务（freemail API） |
+| `g/email_service.py` | 临时邮箱服务（moemail API） |
 | `g/turnstile_service.py` | Turnstile 验证服务 |
 | `g/user_agreement_service.py` | 用户协议同意服务 |
 | `g/nsfw_service.py` | NSFW 设置服务 |
@@ -29,7 +29,7 @@
 
 ## 依赖
 
-- [freemail](https://github.com/user/freemail) - 临时邮箱服务（需自行部署）
+- [moemail](https://docs.moemail.app/api.html#openapi) - 临时邮箱服务（基于官方 API）
 - Turnstile Solver - 内置验证码解决方案
 
 ## 安装
@@ -50,8 +50,8 @@ cp .env.example .env
 
 | 配置项 | 说明 |
 |--------|------|
-| WORKER_DOMAIN | freemail 服务域名 |
-| FREEMAIL_TOKEN | freemail JWT Token |
+| MOEMAIL_API_URL | moemail API 地址（默认 `https://api.moemail.app`） |
+| MOEMAIL_API_KEY | moemail API Key |
 | YESCAPTCHA_KEY | YesCaptcha API Key（可选，不填使用本地 Solver） |
 
 ## 使用
@@ -100,6 +100,6 @@ Grok 注册机
 
 ## 注意事项
 
-- 需要自行部署 freemail 临时邮箱服务
+- 需要配置可用的 moemail API Key
 - 运行前必须先启动 Turnstile Solver
 - 仅供学习研究使用
