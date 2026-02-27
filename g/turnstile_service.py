@@ -3,14 +3,17 @@ Turnstile验证服务类
 """
 import os
 import time
+from pathlib import Path
 import requests
+from urllib.parse import urlencode
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
 
 class TurnstileService:
     """Turnstile验证服务类"""
+    YESCAPTCHA_TIMEOUT = 30
 
     def __init__(self, solver_url="http://127.0.0.1:5072"):
         """
@@ -19,6 +22,9 @@ class TurnstileService:
         self.yescaptcha_key = os.getenv('YESCAPTCHA_KEY', '').strip()
         self.solver_url = solver_url
         self.yescaptcha_api = "https://api.yescaptcha.com"
+        # 本地 solver 访问不应被系统代理接管，否则 127.0.0.1 请求会被错误转发。
+        self.local_session = requests.Session()
+        self.local_session.trust_env = False
 
     def create_task(self, siteurl, sitekey):
         """
@@ -35,7 +41,7 @@ class TurnstileService:
                     "websiteKey": sitekey
                 }
             }
-            response = requests.post(url, json=payload)
+            response = requests.post(url, json=payload, timeout=self.YESCAPTCHA_TIMEOUT)
             response.raise_for_status()
             data = response.json()
             if data.get('errorId') != 0:
@@ -43,12 +49,13 @@ class TurnstileService:
             return data['taskId']
         else:
             # 使用本地 Turnstile Solver
-            url = f"{self.solver_url}/turnstile?url={siteurl}&sitekey={sitekey}"
-            response = requests.get(url)
+            query = urlencode({"url": siteurl, "sitekey": sitekey})
+            url = f"{self.solver_url}/turnstile?{query}"
+            response = self.local_session.get(url, timeout=15)
             response.raise_for_status()
             return response.json()['taskId']
 
-    def get_response(self, task_id, max_retries=30, initial_delay=5, retry_delay=2):
+    def get_response(self, task_id, max_retries=35, initial_delay=5, retry_delay=2):
         """
         获取Turnstile验证响应
         """
@@ -63,7 +70,7 @@ class TurnstileService:
                         "clientKey": self.yescaptcha_key,
                         "taskId": task_id
                     }
-                    response = requests.post(url, json=payload)
+                    response = requests.post(url, json=payload, timeout=self.YESCAPTCHA_TIMEOUT)
                     response.raise_for_status()
                     data = response.json()
 
@@ -86,16 +93,37 @@ class TurnstileService:
                 else:
                     # 使用本地 Turnstile Solver
                     url = f"{self.solver_url}/result?id={task_id}"
-                    response = requests.get(url)
+                    response = self.local_session.get(url, timeout=15)
                     response.raise_for_status()
                     data = response.json()
-                    captcha = data.get('solution', {}).get('token', None)
-
-                    if captcha:
-                        if captcha != "CAPTCHA_FAIL":
+                    status = data.get('status')
+                    if status == 'ready':
+                        captcha = data.get('solution', {}).get('token')
+                        if captcha and captcha != "CAPTCHA_FAIL":
                             return captcha
-                        else:
-                            return None
+                        return None
+
+                    if status == 'processing':
+                        time.sleep(retry_delay)
+                        continue
+
+                    # solver 明确返回不可解时，无需继续等待。
+                    if data.get('errorId') == 1 and data.get('errorCode') == 'ERROR_CAPTCHA_UNSOLVABLE':
+                        return None
+
+                    # 兼容旧响应结构（无 status，仅返回 solution）。
+                    captcha = data.get('solution', {}).get('token')
+                    if captcha:
+                        return captcha if captcha != "CAPTCHA_FAIL" else None
+
+                    if data.get('errorId') == 1:
+                        print(f"本地solver返回错误: {data.get('errorCode')} - {data.get('errorDescription')}")
+                        return None
+
+                    # 其他未知响应继续轮询，避免短暂中间态造成误判。
+                    if status and status != 'processing':
+                        print(f"本地solver未知状态: {status}")
+                        time.sleep(retry_delay)
                     else:
                         time.sleep(retry_delay)
             except Exception as e:

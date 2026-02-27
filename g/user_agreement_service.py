@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 from curl_cffi import requests
+from dotenv import load_dotenv
+from .proxy_utils import build_requests_proxies
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -14,8 +19,13 @@ DEFAULT_USER_AGENT = (
 class UserAgreementService:
     """处理账号协议同意流程（线程安全，无全局状态）。"""
 
-    def __init__(self, cf_clearance: str = ""):
+    def __init__(self, cf_clearance: str = "", proxy_url: str = ""):
         self.cf_clearance = (cf_clearance or "").strip()
+        if proxy_url and proxy_url.strip():
+            proxy = proxy_url.strip()
+            self.proxies = {"http": proxy, "https": proxy}
+        else:
+            self.proxies = build_requests_proxies(preferred_keys=("GROK_PROXY_URL",))
 
     def accept_tos_version(
         self,
@@ -85,6 +95,7 @@ class UserAgreementService:
                 data=data,
                 impersonate=impersonate or "chrome120",
                 timeout=timeout,
+                proxies=self.proxies or None,
             )
             hex_reply = response.content.hex()
             grpc_status = response.headers.get("grpc-status")
