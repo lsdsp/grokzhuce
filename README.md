@@ -147,17 +147,6 @@ StartAll.bat -NoProxy
 powershell -ExecutionPolicy Bypass -File .\organize_logs.ps1
 ```
 
-### 发布前冒烟检查
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\release_smoke.ps1
-```
-
-说明：
-- 运行全部 `unittest`
-- 检查 solver 基础 API 健康（`/result`、`/turnstile`）
-- 若本机未运行 solver，会临时启动并在检查后自动停止
-
 ## 输出示例
 
 ```
