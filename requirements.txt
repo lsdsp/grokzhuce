@@ -1,7 +1,7 @@
-curl_cffi
-beautifulsoup4
-python-dotenv
-requests
-quart
-patchright
-rich
+beautifulsoup4==4.14.3
+curl_cffi==0.14.0
+patchright==1.58.0
+python-dotenv==1.2.1
+quart==0.20.0
+requests==2.32.5
+rich==14.3.3

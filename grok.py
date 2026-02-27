@@ -1,19 +1,37 @@
-import os, json, random, string, time, re, struct, argparse
-import threading
+import argparse
 import concurrent.futures
+import json
+import logging
+import os
+import random
+import re
+import string
+import struct
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
-from curl_cffi import requests
+from typing import Any, Dict, Optional
+from urllib.parse import urljoin
+
 from bs4 import BeautifulSoup
+from curl_cffi import requests
 from dotenv import load_dotenv
 
-from g import EmailService, TurnstileService, UserAgreementService, NsfwSettingsService
+from g import EmailService, NsfwSettingsService, TurnstileService, UserAgreementService
 from g.proxy_utils import build_requests_proxies
 
-# 显式按项目根目录加载 .env，避免从其他工作目录启动时配置丢失。
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
-# 基础配置
+LOGGER = logging.getLogger("grok")
+if not LOGGER.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    LOGGER.addHandler(_h)
+LOGGER.setLevel(logging.INFO)
+
 site_url = "https://accounts.x.ai"
 DEFAULT_IMPERSONATE = "chrome120"
 CHROME_PROFILES = [
@@ -23,9 +41,41 @@ CHROME_PROFILES = [
     {"impersonate": "edge99", "version": "99.0.1150.36", "brand": "edge"},
     {"impersonate": "edge101", "version": "101.0.1210.47", "brand": "edge"},
 ]
+PROXIES = build_requests_proxies(preferred_keys=("GROK_PROXY_URL",))
+
+config = {
+    "site_key": "0x4AAAAAAAhr9JGVDZbrZOo0",
+    "action_id": None,
+    "state_tree": (
+        "%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22(auth)%22"
+        "%2C%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D"
+        "%2C%22%2Fsign-up%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D"
+        "%2Cnull%2Cnull%2Ctrue%5D"
+    ),
+}
+
+# legacy globals kept for compatibility/tests
+post_lock = threading.Lock()
+file_lock = threading.Lock()
+attempt_lock = threading.Lock()
+success_count = 0
+attempt_count = 0
+start_time = time.time()
+target_count = 100
+max_attempts = 0
+stop_event = threading.Event()
+attempt_limit_reached = threading.Event()
+output_file = None
+
+EMAIL_CODE_REQUEST_ROUNDS = 3
+EMAIL_CODE_POLL_ATTEMPTS_PER_ROUND = 180
+MAX_EMAIL_CODE_CYCLES_PER_EMAIL = 3
+SIGNUP_RETRY_PER_CODE = 3
+
+
 def get_random_chrome_profile():
     profile = random.choice(CHROME_PROFILES)
-    if profile.get("brand") == "edge":
+    if profile["brand"] == "edge":
         chrome_major = profile["version"].split(".")[0]
         chrome_version = f"{chrome_major}.0.0.0"
         ua = (
@@ -40,43 +90,16 @@ def get_random_chrome_profile():
             f"Chrome/{profile['version']} Safari/537.36"
         )
     return profile["impersonate"], ua
-PROXIES = build_requests_proxies(preferred_keys=("GROK_PROXY_URL",))
-
-# 动态获取的全局变量
-config = {
-    "site_key": "0x4AAAAAAAhr9JGVDZbrZOo0",
-    "action_id": None,
-    "state_tree": "%5B%22%22%2C%7B%22children%22%3A%5B%22(app)%22%2C%7B%22children%22%3A%5B%22(auth)%22%2C%7B%22children%22%3A%5B%22sign-up%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%2C%22%2Fsign-up%22%2C%22refresh%22%5D%7D%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%5D%7D%2Cnull%2Cnull%2Ctrue%5D"
-}
-
-post_lock = threading.Lock()
-file_lock = threading.Lock()
-attempt_lock = threading.Lock()
-success_count = 0
-attempt_count = 0
-start_time = time.time()
-target_count = 100
-max_attempts = 0
-stop_event = threading.Event()
-attempt_limit_reached = threading.Event()
-output_file = None
-EMAIL_CODE_REQUEST_ROUNDS = 3
-EMAIL_CODE_POLL_ATTEMPTS_PER_ROUND = 180  # 3分钟（按 fetch_verification_code 每秒轮询一次）
-MAX_EMAIL_CODE_CYCLES_PER_EMAIL = 3
 
 
 def compact_text(value, max_len=220):
-    """压缩日志文本，避免打印过长响应。"""
     if value is None:
         return ""
     text = re.sub(r"\s+", " ", str(value)).strip()
-    if len(text) > max_len:
-        return text[:max_len] + "..."
-    return text
+    return text if len(text) <= max_len else text[:max_len] + "..."
 
 
 def read_bool_env(name: str, default: bool) -> bool:
-    """Read bool env with tolerant true/false parsing."""
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
@@ -91,20 +114,130 @@ def read_bool_env(name: str, default: bool) -> bool:
 KEEP_SUCCESS_EMAIL = read_bool_env("KEEP_SUCCESS_EMAIL", False)
 
 
-def should_delete_email_after_registration(
-    registration_succeeded: bool, keep_success_email=None
-) -> bool:
-    """Delete failed emails always; keep successful emails when configured."""
+def should_delete_email_after_registration(registration_succeeded: bool, keep_success_email=None) -> bool:
     if keep_success_email is None:
         keep_success_email = KEEP_SUCCESS_EMAIL
     return (not registration_succeeded) or (not keep_success_email)
 
 
+def mask_email(email: str) -> str:
+    if not email or "@" not in email:
+        return ""
+    local, domain = email.split("@", 1)
+    if len(local) <= 2:
+        return f"{local[:1]}*@{domain}"
+    return f"{local[:2]}***{local[-1]}@{domain}"
+
+
+class ErrorType(str, Enum):
+    NONE = "none"
+    NETWORK = "network"
+    TIMEOUT = "timeout"
+    CAPTCHA = "captcha"
+    PARSE = "parse"
+    SIGNUP = "signup"
+    DEPENDENCY = "dependency"
+    POLICY = "policy"
+    UNKNOWN = "unknown"
+
+
+class StopReason(str, Enum):
+    TARGET_REACHED = "target_reached"
+    ATTEMPT_LIMIT = "attempt_limit"
+    EXTERNAL_STOP = "external_stop"
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    thread_count: int
+    target_count: int
+    max_attempts: int
+    keep_success_email: bool
+    output_file: str
+    proxies: Dict[str, str]
+    metrics_path: str
+
+
+@dataclass
+class RuntimeContext:
+    site_key: str
+    action_id: Optional[str]
+    state_tree: str
+
+
+@dataclass
+class StageResult:
+    ok: bool
+    stage: str
+    error_type: ErrorType = ErrorType.NONE
+    retryable: bool = False
+    details: str = ""
+    data: Dict[str, Any] = field(default_factory=dict)
+    latency_ms: Optional[int] = None
+
+
+@dataclass
+class AttemptClaim:
+    allowed: bool
+    slot_no: int
+    reason: Optional[StopReason] = None
+
+
+class JsonlLogger:
+    def __init__(self, path: str):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
+
+    def event(self, level: str, stage: str, message: str, **fields: Any):
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "level": level,
+            "stage": stage,
+            "message": message,
+            **fields,
+        }
+        with self._lock:
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+class StopPolicy:
+    def __init__(self, target_count: int, max_attempts: int):
+        self.target_count = max(1, int(target_count))
+        self.max_attempts = max(1, int(max_attempts))
+        self.success_count = 0
+        self.attempt_count = 0
+        self.stop_event = threading.Event()
+        self.stop_reason: Optional[StopReason] = None
+        self._lock = threading.Lock()
+
+    def claim_attempt_slot(self) -> AttemptClaim:
+        with self._lock:
+            if self.stop_event.is_set():
+                return AttemptClaim(False, self.attempt_count, self.stop_reason)
+            if self.attempt_count >= self.max_attempts:
+                self.stop_reason = StopReason.ATTEMPT_LIMIT
+                self.stop_event.set()
+                return AttemptClaim(False, self.attempt_count, self.stop_reason)
+            self.attempt_count += 1
+            return AttemptClaim(True, self.attempt_count, None)
+
+    def mark_success(self) -> int:
+        with self._lock:
+            self.success_count += 1
+            if self.success_count >= self.target_count:
+                self.stop_reason = StopReason.TARGET_REACHED
+                self.stop_event.set()
+            return self.success_count
+
+    def should_stop(self) -> bool:
+        return self.stop_event.is_set()
+
+
 def compute_effective_max_attempts(target: int, max_attempts_arg=None) -> int:
-    """Return a bounded global attempt budget for this run."""
     target = max(1, int(target))
     if max_attempts_arg is None:
-        # Default to a retry-friendly but finite budget in unstable networks.
         return max(target * 4, target + 10)
     try:
         provided = int(max_attempts_arg)
@@ -114,7 +247,6 @@ def compute_effective_max_attempts(target: int, max_attempts_arg=None) -> int:
 
 
 def reset_runtime_state():
-    """Reset mutable runtime globals for a fresh run."""
     global success_count, attempt_count, start_time
     success_count = 0
     attempt_count = 0
@@ -124,7 +256,6 @@ def reset_runtime_state():
 
 
 def claim_attempt_slot():
-    """Claim one global account-attempt slot, or return None when exhausted."""
     global attempt_count
     with attempt_lock:
         if stop_event.is_set():
@@ -139,38 +270,41 @@ def claim_attempt_slot():
 
 def generate_random_name() -> str:
     length = random.randint(4, 6)
-    return random.choice(string.ascii_uppercase) + ''.join(random.choice(string.ascii_lowercase) for _ in range(length - 1))
+    return random.choice(string.ascii_uppercase) + "".join(random.choice(string.ascii_lowercase) for _ in range(length - 1))
+
 
 def generate_random_string(length: int = 15) -> str:
     return "".join(random.choice(string.ascii_lowercase + string.digits) for _ in range(length))
 
+
 def encode_grpc_message(field_id, string_value):
     key = (field_id << 3) | 2
-    value_bytes = string_value.encode('utf-8')
-    length = len(value_bytes)
-    payload = struct.pack('B', key) + struct.pack('B', length) + value_bytes
-    return b'\x00' + struct.pack('>I', len(payload)) + payload
+    value_bytes = string_value.encode("utf-8")
+    payload = struct.pack("B", key) + struct.pack("B", len(value_bytes)) + value_bytes
+    return b"\x00" + struct.pack(">I", len(payload)) + payload
+
 
 def encode_grpc_message_verify(email, code):
-    p1 = struct.pack('B', (1 << 3) | 2) + struct.pack('B', len(email)) + email.encode('utf-8')
-    p2 = struct.pack('B', (2 << 3) | 2) + struct.pack('B', len(code)) + code.encode('utf-8')
+    p1 = struct.pack("B", (1 << 3) | 2) + struct.pack("B", len(email)) + email.encode("utf-8")
+    p2 = struct.pack("B", (2 << 3) | 2) + struct.pack("B", len(code)) + code.encode("utf-8")
     payload = p1 + p2
-    return b'\x00' + struct.pack('>I', len(payload)) + payload
+    return b"\x00" + struct.pack(">I", len(payload)) + payload
+
 
 def send_email_code_grpc(session, email):
     url = f"{site_url}/auth_mgmt.AuthManagement/CreateEmailValidationCode"
     data = encode_grpc_message(1, email)
-    headers = {"content-type": "application/grpc-web+proto", "x-grpc-web": "1", "x-user-agent": "connect-es/2.1.1", "origin": site_url, "referer": f"{site_url}/sign-up?redirect=grok-com"}
+    headers = {
+        "content-type": "application/grpc-web+proto",
+        "x-grpc-web": "1",
+        "x-user-agent": "connect-es/2.1.1",
+        "origin": site_url,
+        "referer": f"{site_url}/sign-up?redirect=grok-com",
+    }
     try:
-        # print(f"[debug] {email} 正在发送验证码请求...")
         res = session.post(url, data=data, headers=headers, timeout=30)
-        # print(f"[debug] {email} 请求结束，状态码: {res.status_code}")
         if res.status_code != 200:
-            grpc_status = res.headers.get("grpc-status")
-            print(
-                f"[!] {email} 发送验证码响应异常: http={res.status_code}, grpc={grpc_status}, "
-                f"body={compact_text(res.text)}"
-            )
+            print(f"[!] {email} 发送验证码响应异常: http={res.status_code}, grpc={res.headers.get('grpc-status')}, body={compact_text(res.text)}")
         return res.status_code == 200
     except Exception as e:
         print(f"[-] {email} 发送验证码异常: {e}")
@@ -185,422 +319,331 @@ def request_and_wait_for_email_code(
     poll_attempts_per_round=EMAIL_CODE_POLL_ATTEMPTS_PER_ROUND,
     excluded_codes=None,
 ):
-    """
-    先请求验证码（不依赖请求返回是否成功），再轮询邮箱是否收到验证码。
-    每轮轮询窗口：poll_attempts_per_round 秒；最多重试 max_request_rounds 轮。
-    """
     for round_index in range(1, max_request_rounds + 1):
         sent = send_email_code_grpc(session, email)
-        if sent:
-            print(f"[*] {email} 发码轮次 {round_index}/{max_request_rounds} 已提交，开始查收验证码...")
-        else:
-            print(f"[!] {email} 发码轮次 {round_index}/{max_request_rounds} 请求未确认成功，仍开始查收验证码...")
-
-        verify_code = email_service.fetch_verification_code(
-            email,
-            max_attempts=poll_attempts_per_round,
-            exclude_codes=excluded_codes,
-        )
+        print(f"[*] {email} 发码轮次 {round_index}/{max_request_rounds} {'已提交' if sent else '请求未确认成功'}，开始查收验证码...")
+        verify_code = email_service.fetch_verification_code(email, max_attempts=poll_attempts_per_round, exclude_codes=excluded_codes)
         if verify_code:
-            if len(verify_code) > 4:
-                masked = verify_code[:2] + ("*" * (len(verify_code) - 4)) + verify_code[-2:]
-            else:
-                masked = verify_code
+            masked = verify_code[:2] + ("*" * max(0, len(verify_code) - 4)) + verify_code[-2:] if len(verify_code) > 4 else verify_code
             print(f"[+] {email} 在第 {round_index} 轮收到验证码")
             print(f"[*] {email} 本轮验证码: {masked} (len={len(verify_code)})")
             return verify_code
-
         if round_index < max_request_rounds:
             print(f"[*] {email} 第 {round_index} 轮 3 分钟内未收到验证码，准备重发...")
-
     print(f"[-] {email} 连续 {max_request_rounds} 轮均未收到验证码")
     return None
+
 
 def verify_email_code_grpc(session, email, code):
     url = f"{site_url}/auth_mgmt.AuthManagement/VerifyEmailValidationCode"
     data = encode_grpc_message_verify(email, code)
-    headers = {"content-type": "application/grpc-web+proto", "x-grpc-web": "1", "x-user-agent": "connect-es/2.1.1", "origin": site_url, "referer": f"{site_url}/sign-up?redirect=grok-com"}
+    headers = {
+        "content-type": "application/grpc-web+proto",
+        "x-grpc-web": "1",
+        "x-user-agent": "connect-es/2.1.1",
+        "origin": site_url,
+        "referer": f"{site_url}/sign-up?redirect=grok-com",
+    }
     try:
         res = session.post(url, data=data, headers=headers, timeout=30)
         grpc_status = res.headers.get("grpc-status")
-        body_text = (res.text or "").lower()
-        has_known_error = (
-            "invalid-validation-code" in body_text
-            or "email validation code is invalid" in body_text
-            or '"error"' in body_text
-        )
-        ok = (
-            res.status_code == 200
-            and grpc_status in (None, "0")
-            and not has_known_error
-        )
+        body = (res.text or "").lower()
+        ok = res.status_code == 200 and grpc_status in (None, "0") and "invalid-validation-code" not in body and "email validation code is invalid" not in body and '"error"' not in body
         if not ok:
-            print(
-                f"[!] {email} 验证验证码失败: http={res.status_code}, grpc={grpc_status}, "
-                f"body={compact_text(res.text)}"
-            )
+            print(f"[!] {email} 验证验证码失败: http={res.status_code}, grpc={grpc_status}, body={compact_text(res.text)}")
         return ok
     except Exception as e:
         print(f"[-] {email} 验证验证码异常: {e}")
         return False
 
-def register_single_thread():
-    # 错峰启动，防止瞬时并发过高
-    time.sleep(random.uniform(0, 5))
 
-    try:
-        email_service = EmailService()
-        turnstile_service = TurnstileService()
-        user_agreement_service = UserAgreementService()
-        nsfw_service = NsfwSettingsService()
-    except Exception as e:
-        print(f"[-] 服务初始化失败: {e}")
-        return
-
-    # 修正：直接从 config 获取
-    final_action_id = config["action_id"]
-    if not final_action_id:
-        print("[-] 线程退出：缺少 Action ID")
-        return
-
-    current_email = None  # 追踪当前邮箱，确保异常时能删除
-
-    while True:
+class GrokRunner:
+    def __init__(self, cfg: AppConfig):
+        self.cfg = cfg
+        self.runtime = RuntimeContext(config["site_key"], config["action_id"], config["state_tree"])
+        self.stop = StopPolicy(cfg.target_count, cfg.max_attempts)
+        self.metrics = JsonlLogger(cfg.metrics_path)
+        self.post_lock = threading.Lock()
+        self.write_lock = threading.Lock()
+        self.error_counts: Dict[str, int] = {}
+        self.start_ts = time.time()
+        Path(cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
+        Path(cfg.output_file).touch(exist_ok=True)
         try:
-            if stop_event.is_set():
-                if current_email:
-                    try: email_service.delete_email(current_email)
-                    except: pass
-                return
+            os.chmod(cfg.output_file, 0o600)
+        except Exception:
+            pass
 
-            slot_no = claim_attempt_slot()
-            if slot_no is None:
-                if current_email:
-                    try: email_service.delete_email(current_email)
-                    except: pass
-                    current_email = None
-                return
-            if slot_no <= 3 or slot_no % 20 == 0:
-                print(f"[*] 全局尝试进度: {slot_no}/{max_attempts}")
+    def _log(self, level: str, stage: str, message: str, **fields: Any):
+        fields = {k: v for k, v in fields.items() if v not in (None, "")}
+        self.metrics.event(level, stage, message, **fields)
+        getattr(LOGGER, level.lower() if hasattr(LOGGER, level.lower()) else "info")(message)
 
-            impersonate_fingerprint, account_user_agent = get_random_chrome_profile()
-            with requests.Session(impersonate=impersonate_fingerprint, proxies=PROXIES) as session:
-                # 预热连接
-                try: session.get(site_url, timeout=10)
-                except: pass
+    def _fail(self, r: StageResult, thread_id: int, attempt_no: int, email: str = ""):
+        self.error_counts[r.error_type.value] = self.error_counts.get(r.error_type.value, 0) + 1
+        self._log("warning" if r.retryable else "error", r.stage, f"{r.stage} failed", thread_id=thread_id, attempt_no=attempt_no, email=mask_email(email), error_type=r.error_type.value, details=compact_text(r.details))
 
-                password = generate_random_string()
-
-                try:
-                    jwt, email = email_service.create_email()
-                    current_email = email
-                except Exception as e:
-                    print(f"[-] 邮箱服务抛出异常: {e}")
-                    jwt, email, current_email = None, None, None
-
-                if not email:
-                    print("[-] 创建邮箱失败：未获取到邮箱地址")
-                    time.sleep(5); continue
-
-                if stop_event.is_set():
-                    email_service.delete_email(email)
-                    current_email = None
-                    return
-
-                print(f"[*] 开始注册: {email}")
-
-                registration_succeeded = False
-                force_refresh_code = False
-                used_verify_codes = set()
-
-                # 单个邮箱最多进行若干轮“取码+校验+注册”
-                for code_cycle in range(1, MAX_EMAIL_CODE_CYCLES_PER_EMAIL + 1):
-                    if stop_event.is_set():
-                        email_service.delete_email(email)
-                        current_email = None
-                        return
-
-                    if force_refresh_code:
-                        print(f"[*] {email} 检测到验证码失效，重新进入发码流程（循环 {code_cycle}/{MAX_EMAIL_CODE_CYCLES_PER_EMAIL}）")
-                    force_refresh_code = False
-
-                    # Step 1/2: 先发码（无需校验返回）再查码，3分钟窗口，最多3轮
-                    verify_code = request_and_wait_for_email_code(
-                        session=session,
-                        email_service=email_service,
-                        email=email,
-                        excluded_codes=used_verify_codes,
-                    )
-                    if not verify_code:
-                        print(f"[-] {email} 发码后未获取验证码，放弃本邮箱")
-                        break
-
-                    # Step 3: 验证验证码
-                    if not verify_email_code_grpc(session, email, verify_code):
-                        used_verify_codes.add(verify_code)
-                        print(f"[-] {email} VerifyEmailValidationCode 未通过，准备重新发码")
-                        continue
-
-                    # Step 4: 注册重试循环
-                    code_invalid_in_signup = False
-                    for attempt in range(3):
-                        attempt_no = attempt + 1
-                        if stop_event.is_set():
-                            email_service.delete_email(email)
-                            current_email = None
-                            return
-                        task_id = turnstile_service.create_task(site_url, config["site_key"])
-                        token = turnstile_service.get_response(task_id)
-
-                        if not token or token == "CAPTCHA_FAIL":
-                            print(f"[!] {email} 第 {attempt_no}/3 次 Turnstile 未拿到有效 token")
-                            continue
-
-                        headers = {
-                            "user-agent": account_user_agent, "accept": "text/x-component", "content-type": "text/plain;charset=UTF-8",
-                            "origin": site_url, "referer": f"{site_url}/sign-up", "cookie": f"__cf_bm={session.cookies.get('__cf_bm','')}",
-                            "next-router-state-tree": config["state_tree"], "next-action": final_action_id
-                        }
-                        payload = [{
-                            "emailValidationCode": verify_code,
-                            "createUserAndSessionRequest": {
-                                "email": email, "givenName": generate_random_name(), "familyName": generate_random_name(),
-                                "clearTextPassword": password, "tosAcceptedVersion": "$undefined"
-                            },
-                            "turnstileToken": token, "promptOnDuplicateEmail": True
-                        }]
-
-                        with post_lock:
-                            res = session.post(
-                                f"{site_url}/sign-up",
-                                json=payload,
-                                headers=headers,
-                                timeout=45,
-                            )
-
-                        if res.status_code == 200:
-                            body_text = (res.text or "").lower()
-                            if "invalid-validation-code" in body_text or "email validation code is invalid" in body_text:
-                                used_verify_codes.add(verify_code)
-                                print(
-                                    f"[!] {email} 第 {attempt_no}/3 次 /sign-up 返回验证码无效，准备重新发码；"
-                                    f"body={compact_text(res.text)}"
-                                )
-                                code_invalid_in_signup = True
-                                break
-
-                            match = re.search(r'(https://[^" \s]+set-cookie\?q=[^:" \s]+)1:', res.text)
-                            if not match:
-                                print(
-                                    f"[!] {email} 第 {attempt_no}/3 次 /sign-up 后未提取到 set-cookie 链接，"
-                                    f"body={compact_text(res.text)}"
-                                )
-                                break
-                            if match:
-                                verify_url = match.group(1)
-                                verify_res = session.get(verify_url, allow_redirects=True, timeout=30)
-                                sso = session.cookies.get("sso")
-                                sso_rw = session.cookies.get("sso-rw")
-                                if not sso:
-                                    print(
-                                        f"[!] {email} 第 {attempt_no}/3 次 set-cookie 回跳后未拿到 sso，"
-                                        f"http={verify_res.status_code}, cookies={list(session.cookies.keys())}"
-                                    )
-                                    break
-
-                                tos_result = user_agreement_service.accept_tos_version(
-                                    sso=sso,
-                                    sso_rw=sso_rw or "",
-                                    impersonate=impersonate_fingerprint,
-                                    user_agent=account_user_agent,
-                                )
-                                tos_hex = tos_result.get("hex_reply") or ""
-                                if not tos_result.get("ok") or not tos_hex:
-                                    print(
-                                        f"[!] {email} TOS 同意失败: http={tos_result.get('status_code')}, "
-                                        f"grpc={tos_result.get('grpc_status')}, error={tos_result.get('error')}, "
-                                        f"hex_len={len(tos_hex)}"
-                                    )
-                                    break
-
-                                nsfw_result = nsfw_service.enable_nsfw(
-                                    sso=sso,
-                                    sso_rw=sso_rw or "",
-                                    impersonate=impersonate_fingerprint,
-                                    user_agent=account_user_agent,
-                                )
-                                nsfw_hex = nsfw_result.get("hex_reply") or ""
-                                if not nsfw_result.get("ok") or not nsfw_hex:
-                                    print(
-                                        f"[!] {email} NSFW 开关失败: http={nsfw_result.get('status_code')}, "
-                                        f"grpc={nsfw_result.get('grpc_status')}, error={nsfw_result.get('error')}, "
-                                        f"hex_len={len(nsfw_hex)}"
-                                    )
-                                    break
-
-                                # 立即进行二次验证 (enable_unhinged)
-                                unhinged_result = nsfw_service.enable_unhinged(
-                                    sso=sso,
-                                    sso_rw=sso_rw or "",
-                                    impersonate=impersonate_fingerprint,
-                                    user_agent=account_user_agent,
-                                )
-                                unhinged_ok = unhinged_result.get("ok", False)
-                                unhinged_supported = unhinged_result.get("supported", True)
-                                if not unhinged_ok and unhinged_supported:
-                                    print(
-                                        f"[!] {email} Unhinged 二次验证失败: "
-                                        f"http={unhinged_result.get('status_code')}, "
-                                        f"grpc={unhinged_result.get('grpc_status')}, "
-                                        f"error={unhinged_result.get('error')}"
-                                    )
-
-                                with file_lock:
-                                    global success_count
-                                    if success_count >= target_count:
-                                        if not stop_event.is_set():
-                                            stop_event.set()
-                                        print(f"[*] 已达到目标数量，结束当前邮箱流程: {email}")
-                                        registration_succeeded = True
-                                        break
-                                    try:
-                                        with open(output_file, "a") as f: f.write(sso + "\n")
-                                    except Exception as write_err:
-                                        print(f"[-] 写入文件失败: {write_err}")
-                                        break
-                                    success_count += 1
-                                    avg = (time.time() - start_time) / success_count
-                                    if not unhinged_supported:
-                                        nsfw_tag = "SKIP"
-                                    elif unhinged_ok:
-                                        nsfw_tag = "OK"
-                                    else:
-                                        nsfw_tag = "WARN"
-                                    print(f"[OK] 注册成功: {success_count}/{target_count} | {email} | SSO: {sso[:15]}... | 平均: {avg:.1f}s | NSFW: {nsfw_tag}")
-                                    if success_count >= target_count and not stop_event.is_set():
-                                        stop_event.set()
-                                        print(f"[*] 已达到目标数量: {success_count}/{target_count}，停止新注册")
-                                registration_succeeded = True
-                                break  # 跳出 attempt 重试
-                        else:
-                            print(
-                                f"[!] {email} 第 {attempt_no}/3 次 /sign-up 响应异常: "
-                                f"http={res.status_code}, body={compact_text(res.text)}"
-                            )
-
-                        time.sleep(3)
-
-                    if registration_succeeded:
-                        break
-                    if code_invalid_in_signup:
-                        force_refresh_code = True
-                        continue
-                    print(f"[-] {email} 注册阶段重试 3 次均失败，放弃本邮箱")
-                    break
-
-                if should_delete_email_after_registration(registration_succeeded):
-                    email_service.delete_email(email)
-                else:
-                    print(f"[KEEP] 注册成功后保留邮箱: {email}")
-                current_email = None
-                if not registration_succeeded:
-                    time.sleep(5)
-
-        except Exception as e:
-            print(f"[-] 线程异常({type(e).__name__}): {str(e)[:120]}")
-            # 异常时确保删除邮箱
-            if current_email:
-                try:
-                    email_service.delete_email(current_email)
-                except:
-                    pass
-                current_email = None
-            time.sleep(5)
-
-def main(thread_count=None, total_count=None, max_attempts_arg=None):
-    print("=" * 60 + "\nGrok 注册机\n" + "=" * 60)
-    
-    # 1. 扫描参数
-    print("[*] 正在初始化...")
-    if PROXIES:
-        print(f"[*] 当前代理: {PROXIES.get('https')}")
-    else:
-        print("[!] 未检测到代理配置，将使用直连")
-    print(f"[*] 成功后保留邮箱: {'ON' if KEEP_SUCCESS_EMAIL else 'OFF'}")
-    start_url = f"{site_url}/sign-up"
-    with requests.Session(impersonate=DEFAULT_IMPERSONATE, proxies=PROXIES) as s:
+    def scan_bootstrap(self) -> StageResult:
+        st = time.perf_counter()
         try:
-            html = s.get(start_url, timeout=30).text
-            # Key
-            key_match = re.search(r'sitekey":"(0x4[a-zA-Z0-9_-]+)"', html)
-            if key_match: config["site_key"] = key_match.group(1)
-            # Tree
-            tree_match = re.search(r'next-router-state-tree":"([^"]+)"', html)
-            if tree_match: config["state_tree"] = tree_match.group(1)
-            # Action ID
-            soup = BeautifulSoup(html, 'html.parser')
-            js_urls = [urljoin(start_url, script['src']) for script in soup.find_all('script', src=True) if '_next/static' in script['src']]
-            for js_url in js_urls:
-                js_content = s.get(js_url, timeout=30).text
-                match = re.search(r'7f[a-fA-F0-9]{40}', js_content)
-                if match:
-                    config["action_id"] = match.group(0)
-                    print(f"[+] Action ID: {config['action_id']}")
-                    break
+            with requests.Session(impersonate=DEFAULT_IMPERSONATE, proxies=self.cfg.proxies or None) as s:
+                html = s.get(f"{site_url}/sign-up", timeout=30).text
+                m = re.search(r'sitekey":"(0x4[a-zA-Z0-9_-]+)"', html)
+                if m:
+                    self.runtime.site_key = m.group(1)
+                t = re.search(r'next-router-state-tree":"([^"]+)"', html)
+                if t:
+                    self.runtime.state_tree = t.group(1)
+                soup = BeautifulSoup(html, "html.parser")
+                js_urls = [urljoin(f"{site_url}/sign-up", x["src"]) for x in soup.find_all("script", src=True) if "_next/static" in x["src"]]
+                for js_url in js_urls:
+                    js = s.get(js_url, timeout=30).text
+                    hit = re.search(r"7f[a-fA-F0-9]{40}", js)
+                    if hit:
+                        self.runtime.action_id = hit.group(0)
+                        break
+            if not self.runtime.action_id:
+                return StageResult(False, "scan_bootstrap", ErrorType.PARSE, False, "未找到 Action ID", latency_ms=int((time.perf_counter() - st) * 1000))
+            config.update({"site_key": self.runtime.site_key, "state_tree": self.runtime.state_tree, "action_id": self.runtime.action_id})
+            return StageResult(True, "scan_bootstrap", latency_ms=int((time.perf_counter() - st) * 1000))
         except Exception as e:
-            print(f"[-] 初始化扫描失败: {e}")
+            return StageResult(False, "scan_bootstrap", ErrorType.NETWORK, True, str(e), latency_ms=int((time.perf_counter() - st) * 1000))
+
+    def worker(self, thread_id: int):
+        time.sleep(random.uniform(0, 5))
+        try:
+            email_svc = EmailService()
+            ts_svc = TurnstileService()
+            tos_svc = UserAgreementService()
+            nsfw_svc = NsfwSettingsService()
+        except Exception as e:
+            self._log("error", "bootstrap_thread", f"[T{thread_id}] 服务初始化失败: {e}", thread_id=thread_id, error_type=ErrorType.DEPENDENCY.value)
             return
 
-    if not config["action_id"]:
-        print("[-] 错误: 未找到 Action ID")
-        return
+        while not self.stop.should_stop():
+            claim = self.stop.claim_attempt_slot()
+            if not claim.allowed:
+                break
+            attempt_no = claim.slot_no
+            if attempt_no <= 3 or attempt_no % 20 == 0:
+                self._log("info", "attempt", f"[T{thread_id}] 全局尝试进度: {attempt_no}/{self.stop.max_attempts}", attempt_no=attempt_no, thread_id=thread_id)
 
-    # 2. 启动
+            current_email = ""
+            success = False
+            try:
+                imp, ua = get_random_chrome_profile()
+                with requests.Session(impersonate=imp, proxies=self.cfg.proxies or None) as sess:
+                    try:
+                        sess.get(site_url, timeout=10)
+                    except Exception:
+                        pass
+                    try:
+                        _jwt, email = email_svc.create_email()
+                    except Exception as e:
+                        self._fail(StageResult(False, "create_identity", ErrorType.DEPENDENCY, True, str(e)), thread_id, attempt_no)
+                        time.sleep(5)
+                        continue
+                    if not email:
+                        self._fail(StageResult(False, "create_identity", ErrorType.DEPENDENCY, True, "创建邮箱失败"), thread_id, attempt_no)
+                        time.sleep(5)
+                        continue
+                    current_email = email
+                    password = generate_random_string()
+                    used_codes = set()
+                    for _ in range(MAX_EMAIL_CODE_CYCLES_PER_EMAIL):
+                        code = request_and_wait_for_email_code(sess, email_svc, email, excluded_codes=used_codes)
+                        if not code:
+                            self._fail(StageResult(False, "request_code", ErrorType.TIMEOUT, True, "未收到验证码"), thread_id, attempt_no, email)
+                            break
+                        if not verify_email_code_grpc(sess, email, code):
+                            used_codes.add(code)
+                            self._fail(StageResult(False, "verify_code", ErrorType.SIGNUP, True, "验证码校验失败"), thread_id, attempt_no, email)
+                            continue
+                        signup_ok = False
+                        code_invalid = False
+                        sso = ""
+                        sso_rw = ""
+                        for _ in range(SIGNUP_RETRY_PER_CODE):
+                            task_id = ts_svc.create_task(site_url, self.runtime.site_key)
+                            token = ts_svc.get_response(task_id)
+                            if not token or token == "CAPTCHA_FAIL":
+                                continue
+                            headers = {
+                                "user-agent": ua,
+                                "accept": "text/x-component",
+                                "content-type": "text/plain;charset=UTF-8",
+                                "origin": site_url,
+                                "referer": f"{site_url}/sign-up",
+                                "cookie": f"__cf_bm={sess.cookies.get('__cf_bm', '')}",
+                                "next-router-state-tree": self.runtime.state_tree,
+                                "next-action": self.runtime.action_id,
+                            }
+                            payload = [{
+                                "emailValidationCode": code,
+                                "createUserAndSessionRequest": {
+                                    "email": email,
+                                    "givenName": generate_random_name(),
+                                    "familyName": generate_random_name(),
+                                    "clearTextPassword": password,
+                                    "tosAcceptedVersion": "$undefined",
+                                },
+                                "turnstileToken": token,
+                                "promptOnDuplicateEmail": True,
+                            }]
+                            with self.post_lock:
+                                res = sess.post(f"{site_url}/sign-up", json=payload, headers=headers, timeout=45)
+                            body = (res.text or "").lower()
+                            if "invalid-validation-code" in body or "email validation code is invalid" in body:
+                                code_invalid = True
+                                used_codes.add(code)
+                                break
+                            if res.status_code != 200:
+                                time.sleep(3)
+                                continue
+                            hit = re.search(r'(https://[^" \s]+set-cookie\?q=[^:" \s]+)1:', res.text)
+                            if not hit:
+                                break
+                            back = sess.get(hit.group(1), allow_redirects=True, timeout=30)
+                            _ = back.status_code
+                            sso = sess.cookies.get("sso") or ""
+                            sso_rw = sess.cookies.get("sso-rw") or ""
+                            if not sso:
+                                break
+                            signup_ok = True
+                            break
+                        if code_invalid:
+                            self._log("warning", "signup", f"[T{thread_id}] 注册阶段返回验证码失效，准备重新发码", thread_id=thread_id, attempt_no=attempt_no, email=mask_email(email), error_type=ErrorType.SIGNUP.value)
+                            continue
+                        if not signup_ok:
+                            self._fail(StageResult(False, "signup", ErrorType.SIGNUP, True, "注册重试耗尽"), thread_id, attempt_no, email)
+                            break
+                        tos = tos_svc.accept_tos_version(sso=sso, sso_rw=sso_rw or "", impersonate=imp, user_agent=ua)
+                        if not tos.get("ok") or not tos.get("hex_reply"):
+                            self._fail(StageResult(False, "post_signup_actions", ErrorType.SIGNUP, False, "TOS 失败"), thread_id, attempt_no, email)
+                            break
+                        nsfw = nsfw_svc.enable_nsfw(sso=sso, sso_rw=sso_rw or "", impersonate=imp, user_agent=ua)
+                        if not nsfw.get("ok") or not nsfw.get("hex_reply"):
+                            self._fail(StageResult(False, "post_signup_actions", ErrorType.SIGNUP, False, "NSFW 失败"), thread_id, attempt_no, email)
+                            break
+                        unhinged = nsfw_svc.enable_unhinged(sso=sso, sso_rw=sso_rw or "", impersonate=imp, user_agent=ua)
+                        nsfw_tag = "OK"
+                        if not unhinged.get("supported", True):
+                            nsfw_tag = "SKIP"
+                        elif not unhinged.get("ok", False):
+                            nsfw_tag = "WARN"
+                        with self.write_lock:
+                            with open(self.cfg.output_file, "a", encoding="utf-8") as f:
+                                f.write(sso + "\n")
+                            done = self.stop.mark_success()
+                            avg = (time.time() - self.start_ts) / max(1, done)
+                        self._log("info", "record_success", f"[T{thread_id}] 注册成功: {done}/{self.stop.target_count} | {mask_email(email)} | 平均: {avg:.1f}s | NSFW: {nsfw_tag}", thread_id=thread_id, attempt_no=attempt_no, email=mask_email(email))
+                        success = True
+                        break
+            except Exception as e:
+                self._log("error", "worker_exception", f"[T{thread_id}] 线程异常: {compact_text(e)}", thread_id=thread_id, attempt_no=attempt_no, error_type=ErrorType.UNKNOWN.value)
+                time.sleep(5)
+            finally:
+                if current_email:
+                    if should_delete_email_after_registration(success, self.cfg.keep_success_email):
+                        try:
+                            email_svc.delete_email(current_email)
+                        except Exception:
+                            pass
+                    else:
+                        self._log("info", "cleanup", f"[T{thread_id}] 保留成功邮箱: {mask_email(current_email)}", thread_id=thread_id, attempt_no=attempt_no, email=mask_email(current_email))
+            if not success:
+                time.sleep(5)
+
+    def run(self) -> int:
+        self._log("info", "startup", "正在初始化...", metrics_path=self.cfg.metrics_path)
+        self._log("info", "startup", f"当前代理: {self.cfg.proxies.get('https') if self.cfg.proxies else '直连'}")
+        self._log("info", "startup", f"成功后保留邮箱: {'ON' if self.cfg.keep_success_email else 'OFF'}")
+        boot = self.scan_bootstrap()
+        if not boot.ok:
+            self._fail(boot, thread_id=0, attempt_no=0)
+            return 1
+        self._log("info", "scan_bootstrap", f"Action ID: {self.runtime.action_id}", latency_ms=boot.latency_ms)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.cfg.thread_count) as ex:
+            futures = [ex.submit(self.worker, i + 1) for i in range(self.cfg.thread_count)]
+            for f in concurrent.futures.as_completed(futures):
+                try:
+                    f.result()
+                except Exception as e:
+                    self._log("error", "executor", f"worker future 异常: {e}", error_type=ErrorType.UNKNOWN.value)
+        self._log("info", "summary", f"运行结束: success={self.stop.success_count}/{self.stop.target_count}, attempts={self.stop.attempt_count}/{self.stop.max_attempts}, stop_reason={self.stop.stop_reason.value if self.stop.stop_reason else 'n/a'}")
+        for k, v in sorted(self.error_counts.items(), key=lambda x: x[1], reverse=True):
+            self._log("info", "summary", f"failure_bucket {k}={v}")
+        if self.stop.stop_reason == StopReason.ATTEMPT_LIMIT and self.stop.success_count < self.stop.target_count:
+            self._log("warning", "summary", "已达到最大尝试上限，提前停止。 [ATTEMPT_LIMIT_REACHED]", error_type=ErrorType.POLICY.value)
+        return 0
+
+
+def register_single_thread():
+    raise RuntimeError("register_single_thread 已弃用，请通过 main()/GrokRunner.run() 启动。")
+
+
+def main(thread_count=None, total_count=None, max_attempts_arg=None, metrics_file=None):
+    print("=" * 60 + "\nGrok 注册机\n" + "=" * 60)
     if thread_count is None:
         try:
             t = int(input("\n并发数 (默认8): ").strip() or 8)
-        except:
+        except Exception:
             t = 8
     else:
         t = int(thread_count)
-
     if total_count is None:
         try:
             total = int(input("注册数量 (默认100): ").strip() or 100)
-        except:
+        except Exception:
             total = 100
     else:
         total = int(total_count)
 
-    global target_count, max_attempts, output_file
-    target_count = max(1, total)
-    max_attempts = compute_effective_max_attempts(target_count, max_attempts_arg)
+    t = max(1, t)
+    total = max(1, total)
+    eff = compute_effective_max_attempts(total, max_attempts_arg)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs("keys", exist_ok=True)
+    os.makedirs("logs/grok", exist_ok=True)
+    out = f"keys/grok_{ts}_{total}.txt"
+    metrics = metrics_file or f"logs/grok/metrics.{ts}.jsonl"
+
+    cfg = AppConfig(
+        thread_count=t,
+        target_count=total,
+        max_attempts=eff,
+        keep_success_email=KEEP_SUCCESS_EMAIL,
+        output_file=out,
+        proxies=PROXIES,
+        metrics_path=metrics,
+    )
+
+    global target_count, max_attempts, output_file, success_count, attempt_count
+    target_count = total
+    max_attempts = eff
+    output_file = out
     reset_runtime_state()
 
-    from datetime import datetime
-    os.makedirs("keys", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = f"keys/grok_{timestamp}_{target_count}.txt"
-
-    print(f"[*] 启动 {t} 个线程，目标 {target_count} 个")
-    print(f"[*] 最大尝试上限: {max_attempts}")
+    print(f"[*] 启动 {t} 个线程，目标 {total} 个")
+    print(f"[*] 最大尝试上限: {eff}")
     if max_attempts_arg is None:
-        print(
-            f"[*] 未指定 --max-attempts，自动使用 {max_attempts}。"
-            f"如网络不稳定可手动调整（例如 --max-attempts {target_count * 4}）。"
-        )
-    print(f"[*] 输出: {output_file}")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=t) as executor:
-        futures = [executor.submit(register_single_thread) for _ in range(t)]
-        concurrent.futures.wait(futures)
-    print(f"[*] 运行结束: 成功 {success_count}/{target_count}，尝试 {attempt_count}/{max_attempts}")
-    if attempt_limit_reached.is_set() and success_count < target_count:
-        print("[!] 已达到最大尝试上限，提前停止。请检查代理/网络后重试。 [ATTEMPT_LIMIT_REACHED]")
+        print(f"[*] 未指定 --max-attempts，自动使用 {eff}。如网络不稳定可手动调整（例如 --max-attempts {total * 4}）。")
+
+    runner = GrokRunner(cfg)
+    code = runner.run()
+    success_count = runner.stop.success_count
+    attempt_count = runner.stop.attempt_count
+    if runner.stop.stop_reason == StopReason.ATTEMPT_LIMIT:
+        attempt_limit_reached.set()
+        stop_event.set()
+    return code
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Grok batch registration")
     parser.add_argument("--threads", type=int, default=None, help="并发数")
     parser.add_argument("--count", type=int, default=None, help="注册数量")
     parser.add_argument("--max-attempts", type=int, default=None, help="最大尝试次数（默认按 count 自动计算）")
+    parser.add_argument("--metrics-file", type=str, default=None, help="结构化指标日志输出路径（JSONL）")
     args = parser.parse_args()
-    main(thread_count=args.threads, total_count=args.count, max_attempts_arg=args.max_attempts)
+    raise SystemExit(main(thread_count=args.threads, total_count=args.count, max_attempts_arg=args.max_attempts, metrics_file=args.metrics_file))

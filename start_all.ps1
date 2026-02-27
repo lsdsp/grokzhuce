@@ -326,7 +326,9 @@ try {
     $hasSuccess = $false
     $hasFailurePattern = $false
     if (Test-Path $grokOut) {
-        $hasSuccess = Select-String -Path $grokOut -Pattern "[OK]" -SimpleMatch -Quiet
+        $hasSuccess =
+            (Select-String -Path $grokOut -Pattern "[OK]" -SimpleMatch -Quiet) -or
+            (Select-String -Path $grokOut -Pattern "注册成功:" -SimpleMatch -Quiet)
         $attemptLimitHit =
             (Select-String -Path $grokOut -Pattern "ATTEMPT_LIMIT_REACHED" -SimpleMatch -Quiet) -or
             (Select-String -Path $grokOut -Pattern "已达到最大尝试上限" -SimpleMatch -Quiet)
