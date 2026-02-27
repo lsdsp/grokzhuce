@@ -112,6 +112,7 @@ python grok.py --threads 3 --count 30 --max-attempts 120
 - 启动 Solver（`--thread 5`）
 - Solver 初始化完成后提示输入 `threads` 和 `count`（回车使用默认 `3/5`）
 - 运行日志分别写入 `logs/oneclick/`、`logs/solver/`、`logs/grok/`
+- 注册流程结束后自动停止 Solver（无论是否达到目标，最长等待 3 分钟；若启动前已有 Solver 也会关闭）
 
 也可以命令行传参：
 

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Nullable[int]]$Threads = $null,
     [Nullable[int]]$Count = $null,
     [Nullable[int]]$MaxAttempts = $null,
@@ -72,6 +72,85 @@ function Test-SolverReady {
     } catch {
         return $false
     }
+}
+
+function Get-SolverProcessIds {
+    $ids = @()
+
+    try {
+        $listenLines = @(netstat -ano | findstr ":5072" | findstr "LISTENING")
+        foreach ($line in $listenLines) {
+            $parts = ($line -split "\s+") | Where-Object { $_ -ne "" }
+            if ($parts.Count -ge 5) {
+                $pidStr = $parts[-1]
+                if ($pidStr -match "^\d+$") {
+                    $ids += [int]$pidStr
+                }
+            }
+        }
+    } catch {}
+
+    try {
+        $solverPids = Get-CimInstance Win32_Process -Filter "name='python.exe'" -ErrorAction Stop |
+            Where-Object { $_.CommandLine -like "*api_solver.py*" } |
+            Select-Object -ExpandProperty ProcessId
+        foreach ($pid in $solverPids) {
+            if ("$pid" -match "^\d+$") {
+                $ids += [int]$pid
+            }
+        }
+    } catch {}
+
+    return @($ids | Sort-Object -Unique)
+}
+
+function Stop-SolverWithTimeout {
+    param([int]$TimeoutSec = 180)
+
+    Write-Step "Stopping solver (timeout ${TimeoutSec}s)..."
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $signaled = @{}
+
+    while ((Get-Date) -lt $deadline) {
+        $pids = Get-SolverProcessIds
+        $isReady = Test-SolverReady
+        if (($pids.Count -eq 0) -and (-not $isReady)) {
+            Write-Step "Solver stopped."
+            return $true
+        }
+
+        foreach ($pid in $pids) {
+            if (-not $signaled.ContainsKey($pid)) {
+                try {
+                    Stop-Process -Id $pid -ErrorAction SilentlyContinue
+                    Write-Step "Stop signal sent to solver PID: $pid"
+                } catch {}
+                $signaled[$pid] = $true
+            }
+        }
+
+        Start-Sleep -Seconds 2
+    }
+
+    $remaining = Get-SolverProcessIds
+    if ($remaining.Count -gt 0) {
+        Write-Step "Timeout reached, force stopping solver PID(s): $($remaining -join ', ')"
+        foreach ($pid in $remaining) {
+            try {
+                Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+            } catch {}
+        }
+        Start-Sleep -Seconds 2
+    }
+
+    $finalRemaining = Get-SolverProcessIds
+    if (($finalRemaining.Count -eq 0) -and (-not (Test-SolverReady))) {
+        Write-Step "Solver force-stop completed."
+        return $true
+    }
+
+    Write-Step "Solver may still be running after timeout."
+    return $false
 }
 
 function Write-Diag {
@@ -194,6 +273,8 @@ if (Test-SolverReady) {
     }
 
     if (-not $ready) {
+        Write-Step "Solver not ready within 60 seconds; starting cleanup."
+        [void](Stop-SolverWithTimeout -TimeoutSec 180)
         Write-Error "Solver did not become ready on port 5072 within 60 seconds."
         exit 1
     }
@@ -233,39 +314,48 @@ if ($PSBoundParameters.ContainsKey("MaxAttempts")) {
     $grokArgs += @("--max-attempts", "$MaxAttempts")
     Write-Step "Apply max attempts: $MaxAttempts"
 }
-& $pythonPath @grokArgs 2>&1 | Tee-Object -FilePath $grokOut
-$exitCode = $LASTEXITCODE
-if ($null -eq $exitCode) {
-    $exitCode = 0
-}
-Write-Step "grok.py exited with code $exitCode"
-$attemptLimitHit = $false
-$hasSuccess = $false
-$hasFailurePattern = $false
-if (Test-Path $grokOut) {
-    $hasSuccess = Select-String -Path $grokOut -Pattern "[OK]" -SimpleMatch -Quiet
-    $attemptLimitHit =
-        (Select-String -Path $grokOut -Pattern "ATTEMPT_LIMIT_REACHED" -SimpleMatch -Quiet) -or
-        (Select-String -Path $grokOut -Pattern "已达到最大尝试上限" -SimpleMatch -Quiet)
-    foreach ($hint in @(
-        "初始化扫描失败",
-        "未找到 Action ID",
-        "服务初始化失败",
-        "Traceback",
-        "ModuleNotFoundError",
-        "TLS connect error",
-        "Connection timed out",
-        "Resolving timed out",
-        "SSLError",
-        "Timeout"
-    )) {
-        if (Select-String -Path $grokOut -Pattern $hint -SimpleMatch -Quiet) {
-            $hasFailurePattern = $true
-            break
+$exitCode = 1
+try {
+    & $pythonPath @grokArgs 2>&1 | Tee-Object -FilePath $grokOut
+    $exitCode = $LASTEXITCODE
+    if ($null -eq $exitCode) {
+        $exitCode = 0
+    }
+    Write-Step "grok.py exited with code $exitCode"
+    $attemptLimitHit = $false
+    $hasSuccess = $false
+    $hasFailurePattern = $false
+    if (Test-Path $grokOut) {
+        $hasSuccess = Select-String -Path $grokOut -Pattern "[OK]" -SimpleMatch -Quiet
+        $attemptLimitHit =
+            (Select-String -Path $grokOut -Pattern "ATTEMPT_LIMIT_REACHED" -SimpleMatch -Quiet) -or
+            (Select-String -Path $grokOut -Pattern "已达到最大尝试上限" -SimpleMatch -Quiet)
+        foreach ($hint in @(
+            "初始化扫描失败",
+            "未找到 Action ID",
+            "服务初始化失败",
+            "Traceback",
+            "ModuleNotFoundError",
+            "TLS connect error",
+            "Connection timed out",
+            "Resolving timed out",
+            "SSLError",
+            "Timeout"
+        )) {
+            if (Select-String -Path $grokOut -Pattern $hint -SimpleMatch -Quiet) {
+                $hasFailurePattern = $true
+                break
+            }
         }
     }
-}
-if ($exitCode -ne 0 -or $attemptLimitHit -or ((-not $hasSuccess) -and $hasFailurePattern)) {
-    Show-GrokFailureSummary -LogPath $grokOut
+    if ($exitCode -ne 0 -or $attemptLimitHit -or ((-not $hasSuccess) -and $hasFailurePattern)) {
+        Show-GrokFailureSummary -LogPath $grokOut
+    }
+} finally {
+    $stopped = Stop-SolverWithTimeout -TimeoutSec 180
+    if (-not $stopped -and $exitCode -eq 0) {
+        $exitCode = 1
+    }
 }
 exit $exitCode
+
