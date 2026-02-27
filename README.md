@@ -65,7 +65,7 @@ Copy-Item .env.example .env
 | MOEMAIL_API_URL | moemail API 地址（默认 `https://api.moemail.app`） |
 | MOEMAIL_API_KEY | moemail API Key |
 | MOEMAIL_PROXY_URL | moemail 请求代理（可选，空字符串视为未设置） |
-| MOEMAIL_VERIFY_SSL | moemail HTTPS 证书校验（可选，`1/0`，空字符串视为未设置） |
+| MOEMAIL_VERIFY_SSL | moemail HTTPS 证书校验（可选，`true/false`，空字符串视为未设置） |
 | YESCAPTCHA_KEY | YesCaptcha API Key（可选，不填使用本地 Solver） |
 | GROK_PROXY_URL | Grok 主流程代理（可选） |
 | KEEP_SUCCESS_EMAIL | 注册成功后是否保留邮箱（可选，`true/false`，默认 `false`） |

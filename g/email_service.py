@@ -54,7 +54,13 @@ class EmailService:
         if verify_ssl_env is None or not verify_ssl_env.strip():
             verify_ssl = not bool(proxy_url)
         else:
-            verify_ssl = verify_ssl_env.strip().lower() not in {"0", "false", "no", "off"}
+            verify_ssl_value = verify_ssl_env.strip().lower()
+            if verify_ssl_value in {"true", "1", "yes", "on"}:
+                verify_ssl = True
+            elif verify_ssl_value in {"false", "0", "no", "off"}:
+                verify_ssl = False
+            else:
+                verify_ssl = not bool(proxy_url)
 
         self.request_kwargs = {"verify": verify_ssl}
         if not verify_ssl:

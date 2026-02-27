@@ -55,7 +55,7 @@ class EmailServiceOpenApiFlowTests(unittest.TestCase):
             {
                 "MOEMAIL_API_KEY": "test-key",
                 "MOEMAIL_API_URL": "https://api.moemail.app",
-                "MOEMAIL_VERIFY_SSL": "1",
+                "MOEMAIL_VERIFY_SSL": "true",
             },
             clear=False,
         ):
@@ -69,6 +69,20 @@ class EmailServiceOpenApiFlowTests(unittest.TestCase):
                 "MOEMAIL_API_URL": "https://api.moemail.app",
                 "MOEMAIL_PROXY_URL": "http://127.0.0.1:10808",
                 "MOEMAIL_VERIFY_SSL": "",
+            },
+            clear=False,
+        ):
+            service = EmailService()
+
+        self.assertFalse(service.request_kwargs.get("verify"))
+
+    def test_verify_ssl_false_string_disables_cert_validation(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "MOEMAIL_API_KEY": "test-key",
+                "MOEMAIL_API_URL": "https://api.moemail.app",
+                "MOEMAIL_VERIFY_SSL": "false",
             },
             clear=False,
         ):
