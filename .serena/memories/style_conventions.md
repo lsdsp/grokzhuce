@@ -1,0 +1,3 @@
+Conventions: PEP 8 style, 4-space indentation, snake_case for functions/modules, PascalCase for classes, UPPER_CASE for constants. The repository prefers concise operational logging and explicit timeouts on network paths. Environment is loaded from .env using python-dotenv. Tests are deterministic and offline by mocking HTTP/time-sensitive behavior.
+
+Patterns: Service responsibilities live under g/. grok.py uses dataclasses for runtime/config/result objects and a StopPolicy/GrokRunner orchestration layer, but still keeps some legacy globals/functions for compatibility with older tests. Logs are a mix of structured JSONL metrics (JsonlLogger) and direct console prints. Proxy resolution is centralized in g/proxy_utils.py.

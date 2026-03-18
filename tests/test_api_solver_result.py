@@ -19,7 +19,7 @@ class ApiSolverResultTests(unittest.IsolatedAsyncioTestCase):
         server = self._build_server()
         mocked_result = {"status": "CAPTCHA_NOT_READY", "value": "token-abc"}
 
-        with patch("api_solver.load_result", new=AsyncMock(return_value=mocked_result)):
+        with patch.object(server.repository, "load", new=AsyncMock(return_value=mocked_result)):
             async with server.app.test_request_context("/result?id=task-1"):
                 response, status_code = await server.get_result()
 
@@ -32,7 +32,7 @@ class ApiSolverResultTests(unittest.IsolatedAsyncioTestCase):
         server = self._build_server()
         mocked_result = {"status": "CAPTCHA_NOT_READY", "value": "CAPTCHA_FAIL"}
 
-        with patch("api_solver.load_result", new=AsyncMock(return_value=mocked_result)):
+        with patch.object(server.repository, "load", new=AsyncMock(return_value=mocked_result)):
             async with server.app.test_request_context("/result?id=task-2"):
                 response, status_code = await server.get_result()
 
@@ -63,7 +63,7 @@ class ApiSolverResultTests(unittest.IsolatedAsyncioTestCase):
         browser.is_connected.return_value = False
         replacement = Mock()
 
-        with patch.object(server, "_spawn_browser_for_config", new=AsyncMock(return_value=replacement)) as spawn_mock:
+        with patch.object(server.pool_manager, "spawn_browser_for_config", new=AsyncMock(return_value=replacement)) as spawn_mock:
             await server._return_or_replace_browser(
                 index=2,
                 browser=browser,

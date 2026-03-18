@@ -21,15 +21,18 @@ class GrokAttemptBudgetTests(unittest.TestCase):
         self.assertEqual(grok.compute_effective_max_attempts(10, max_attempts_arg=5), 5)
         self.assertEqual(grok.compute_effective_max_attempts(10, max_attempts_arg=15), 15)
 
-    def test_claim_attempt_slot_stops_when_reaching_limit(self):
-        grok.max_attempts = 2
+    def test_reset_runtime_state_clears_compatibility_flags(self):
+        grok.success_count = 2
+        grok.attempt_count = 3
+        grok.stop_event.set()
+        grok.attempt_limit_reached.set()
 
-        self.assertEqual(grok.claim_attempt_slot(), 1)
-        self.assertEqual(grok.claim_attempt_slot(), 2)
-        self.assertIsNone(grok.claim_attempt_slot())
+        grok.reset_runtime_state()
 
-        self.assertTrue(grok.attempt_limit_reached.is_set())
-        self.assertTrue(grok.stop_event.is_set())
+        self.assertEqual(grok.success_count, 0)
+        self.assertEqual(grok.attempt_count, 0)
+        self.assertFalse(grok.stop_event.is_set())
+        self.assertFalse(grok.attempt_limit_reached.is_set())
 
     def test_should_delete_email_after_registration(self):
         self.assertFalse(

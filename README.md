@@ -7,7 +7,8 @@
 - 自动创建临时邮箱
 - 自动获取验证码
 - 自动完成注册流程
-- 自动开启 NSFW/Unhinged 模式
+- 可配置是否开启 NSFW/Unhinged 模式
+- NSFW 后置流程：`TOS -> Set Birth Date -> NSFW -> Unhinged(可降级)`
 - 注册完成后自动清理临时邮箱（可通过 `KEEP_SUCCESS_EMAIL=true` 保留成功邮箱）
 - 支持多线程并发注册
 - 弱网保护：支持尝试上限与失败摘要输出
@@ -25,6 +26,13 @@
 | `api_solver.py` | Turnstile 验证码解决器 |
 | `browser_configs.py` | 浏览器指纹配置 |
 | `db_results.py` | 验证结果存储 |
+| `grok_config.py` | Grok 主流程配置构建与环境默认值 |
+| `grok_runtime.py` | Grok 运行时模型、停止策略与 JSONL 日志 |
+| `grok_protocol.py` | Grok bootstrap / 发码 / 验码等协议辅助逻辑 |
+| `grok_registration.py` | Grok 注册主流程编排器 |
+| `solver_browser_pool.py` | Solver 浏览器池生命周期管理 |
+| `solver_result_repository.py` | Solver 结果仓储语义适配 |
+| `solver_task_service.py` | Solver 单任务求解与结果调度 |
 | `g/email_service.py` | 临时邮箱服务（moemail API） |
 | `g/turnstile_service.py` | Turnstile 验证服务 |
 | `g/user_agreement_service.py` | 用户协议同意服务 |
@@ -87,6 +95,11 @@ Copy-Item .env.example .env
 | YESCAPTCHA_KEY | YesCaptcha API Key（可选，不填使用本地 Solver） |
 | GROK_PROXY_URL | Grok 主流程代理（可选） |
 | KEEP_SUCCESS_EMAIL | 注册成功后是否保留邮箱（可选，`true/false`，默认 `false`） |
+| ENABLE_NSFW | 是否开启 NSFW/Unhinged（可选，`true/false`，默认 `true`） |
+| NSFW_TIMEOUT | NSFW 后置请求超时秒数（可选，默认 `20`） |
+| NSFW_RETRY_ATTEMPTS | NSFW 后置请求重试次数（可选，默认 `2`） |
+| NSFW_CONCURRENT | NSFW 后置请求并发闸门（可选，默认 `3`） |
+| UNHINGED_FEATURE_KEY | 自定义 Unhinged feature key（可选） |
 
 ## 使用
 
