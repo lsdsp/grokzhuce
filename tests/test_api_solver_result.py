@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
+from types import SimpleNamespace
 
 from api_solver import TurnstileAPIServer
 
@@ -75,6 +76,33 @@ class ApiSolverResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queued_index, 2)
         self.assertIs(queued_browser, replacement)
         self.assertEqual(queued_config["useragent"], "ua2")
+
+    async def test_server_supports_injected_repository_and_page_actions(self):
+        repository = Mock()
+        page_actions = SimpleNamespace(
+            antishadow_inject=AsyncMock(),
+            block_rendering=AsyncMock(),
+            unblock_rendering=AsyncMock(),
+            inject_captcha_directly=AsyncMock(),
+            try_click_strategies=AsyncMock(),
+        )
+
+        server = TurnstileAPIServer(
+            headless=True,
+            useragent=None,
+            debug=False,
+            browser_type="camoufox",
+            thread=1,
+            proxy_support=False,
+            repository=repository,
+            page_actions=page_actions,
+        )
+
+        self.assertIs(server.repository, repository)
+        self.assertIs(server.task_service.repository, repository)
+        self.assertIs(server.page_actions, page_actions)
+        self.assertIs(server.task_service.antishadow_inject, page_actions.antishadow_inject)
+        self.assertIs(server.task_service.inject_captcha_directly, page_actions.inject_captcha_directly)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 import concurrent.futures
 import os
 import random
-import re
 import threading
 import time
 from dataclasses import dataclass
@@ -14,9 +13,7 @@ from g import EmailService, NsfwSettingsService, TurnstileService, UserAgreement
 from grok_config import DEFAULT_SITE_URL, build_default_runtime_context, should_delete_email_after_registration
 from grok_protocol import (
     MAX_EMAIL_CODE_CYCLES_PER_EMAIL,
-    SIGNUP_RETRY_PER_CODE,
     compact_text,
-    generate_random_name,
     generate_random_string,
     get_random_chrome_profile,
     mask_email,
@@ -24,6 +21,7 @@ from grok_protocol import (
     scan_signup_bootstrap,
     verify_email_code_grpc,
 )
+from grok_protocol_signup import attempt_signup
 from grok_runtime import AppConfig, ErrorType, JsonlLogger, LOGGER, RuntimeContext, StageResult, StopPolicy, StopReason
 
 
@@ -151,52 +149,18 @@ class GrokRunner:
         return StageResult(True, "verify_code", data={"code": code})
 
     def _attempt_signup(self, session, services: ServiceBundle, email: str, password: str, code: str, impersonate: str, user_agent: str) -> StageResult:
-        for _ in range(SIGNUP_RETRY_PER_CODE):
-            task_id = services.turnstile_service.create_task(self.site_url, self.runtime.site_key)
-            token = services.turnstile_service.get_response(task_id)
-            if not token or token == "CAPTCHA_FAIL":
-                continue
-            headers = {
-                "user-agent": user_agent,
-                "accept": "text/x-component",
-                "content-type": "text/plain;charset=UTF-8",
-                "origin": self.site_url,
-                "referer": f"{self.site_url}/sign-up",
-                "cookie": f"__cf_bm={session.cookies.get('__cf_bm', '')}",
-                "next-router-state-tree": self.runtime.state_tree,
-                "next-action": self.runtime.action_id,
-            }
-            payload = [{
-                "emailValidationCode": code,
-                "createUserAndSessionRequest": {
-                    "email": email,
-                    "givenName": generate_random_name(),
-                    "familyName": generate_random_name(),
-                    "clearTextPassword": password,
-                    "tosAcceptedVersion": "$undefined",
-                },
-                "turnstileToken": token,
-                "promptOnDuplicateEmail": True,
-            }]
-            with self.post_lock:
-                response = session.post(f"{self.site_url}/sign-up", json=payload, headers=headers, timeout=45)
-            body = (response.text or "").lower()
-            if "invalid-validation-code" in body or "email validation code is invalid" in body:
-                return StageResult(False, "signup", ErrorType.SIGNUP, True, "验证码失效", data={"code_invalid": True})
-            if response.status_code != 200:
-                time.sleep(3)
-                continue
-            match = re.search(r'(https://[^" \s]+set-cookie\?q=[^:" \s]+)1:', response.text)
-            if not match:
-                break
-            back = session.get(match.group(1), allow_redirects=True, timeout=30)
-            _ = back.status_code
-            sso = session.cookies.get("sso") or ""
-            sso_rw = session.cookies.get("sso-rw") or ""
-            if not sso:
-                break
-            return StageResult(True, "signup", data={"sso": sso, "sso_rw": sso_rw, "impersonate": impersonate, "user_agent": user_agent})
-        return StageResult(False, "signup", ErrorType.SIGNUP, True, "注册重试耗尽")
+        return attempt_signup(
+            session=session,
+            turnstile_service=services.turnstile_service,
+            runtime=self.runtime,
+            site_url=self.site_url,
+            email=email,
+            password=password,
+            code=code,
+            impersonate=impersonate,
+            user_agent=user_agent,
+            post_lock=self.post_lock,
+        )
 
     def _run_post_signup_actions(self, services: ServiceBundle, signup_result: StageResult) -> StageResult:
         data = signup_result.data

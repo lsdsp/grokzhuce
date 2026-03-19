@@ -23,15 +23,19 @@
 | `start_all.ps1` | 一键启动脚本主体（支持传参） |
 | `start_all.sh` | Linux/macOS 一键启动脚本（参数与 `start_all.ps1` 对齐） |
 | `TurnstileSolver.bat` | Turnstile Solver 启动脚本 |
-| `api_solver.py` | Turnstile 验证码解决器 |
+| `api_solver.py` | Turnstile Solver CLI 入口 |
 | `browser_configs.py` | 浏览器指纹配置 |
-| `db_results.py` | 验证结果存储 |
+| `db_results.py` | Solver 结果存储兼容层 |
 | `grok_config.py` | Grok 主流程配置构建与环境默认值 |
 | `grok_runtime.py` | Grok 运行时模型、停止策略与 JSONL 日志 |
 | `grok_protocol.py` | Grok bootstrap / 发码 / 验码等协议辅助逻辑 |
 | `grok_registration.py` | Grok 注册主流程编排器 |
 | `solver_browser_pool.py` | Solver 浏览器池生命周期管理 |
+| `solver_logging.py` | Solver 日志样式与 logger 工厂 |
+| `solver_page_actions.py` | Solver 页面交互/点击/注入策略 |
 | `solver_result_repository.py` | Solver 结果仓储语义适配 |
+| `solver_result_store.py` | Solver 结果存储后端（内存 / SQLite） |
+| `solver_server.py` | Solver HTTP 服务与路由 |
 | `solver_task_service.py` | Solver 单任务求解与结果调度 |
 | `g/email_service.py` | 临时邮箱服务（moemail API） |
 | `g/turnstile_service.py` | Turnstile 验证服务 |
@@ -93,6 +97,8 @@ Copy-Item .env.example .env
 | MOEMAIL_PROXY_URL | moemail 请求代理（可选，空字符串视为未设置） |
 | MOEMAIL_VERIFY_SSL | moemail HTTPS 证书校验（可选，`true/false`，空字符串视为未设置） |
 | YESCAPTCHA_KEY | YesCaptcha API Key（可选，不填使用本地 Solver） |
+| SOLVER_RESULT_STORE | Solver 结果存储后端（可选，`memory/sqlite`，默认 `memory`） |
+| SOLVER_RESULT_DB_PATH | SQLite 后端数据库路径（可选，默认 `logs/solver/solver-results.sqlite3`） |
 | GROK_PROXY_URL | Grok 主流程代理（可选） |
 | KEEP_SUCCESS_EMAIL | 注册成功后是否保留邮箱（可选，`true/false`，默认 `false`） |
 | ENABLE_NSFW | 是否开启 NSFW/Unhinged（可选，`true/false`，默认 `true`） |
@@ -112,6 +118,13 @@ python api_solver.py --browser_type camoufox --thread 5 --debug
 ```
 
 等待 Solver 启动完成（默认监听 `http://127.0.0.1:5072`）
+
+如需让 solver 结果跨重启保留，可在 `.env` 中启用 SQLite 后端：
+
+```bash
+SOLVER_RESULT_STORE=sqlite
+SOLVER_RESULT_DB_PATH=logs/solver/solver-results.sqlite3
+```
 
 ### 2. 运行注册程序
 
@@ -152,11 +165,18 @@ python grok.py --threads 3 --count 30 --max-attempts 120
 StartAll.bat -Threads 3 -Count 30 -SolverThread 5 -MaxAttempts 120
 ```
 
+如需在一键启动时直接指定 solver 结果存储后端，可追加：
+
+```bash
+StartAll.bat -Threads 3 -Count 30 -SolverResultStore sqlite -SolverResultDbPath logs/solver/solver-results.sqlite3
+```
+
 参数优先级：
 
 - 传了 `-Threads/-Count`：直接使用，不再询问
 - 未传 `-Threads/-Count`：在初始化后交互输入（支持回车使用默认值）
 - 可传 `-MaxAttempts`：限制最大尝试次数（不传则由 `grok.py` 自动计算）
+- 可传 `-SolverResultStore/-SolverResultDbPath`：仅在脚本自行拉起 solver 时覆盖结果存储后端
 - 可传 `-ProxyHttp/-ProxySocks`：覆盖默认本地代理地址
 
 禁用代理：
@@ -169,6 +189,12 @@ Linux / macOS 一键启动示例：
 
 ```bash
 bash ./start_all.sh --threads 3 --count 30 --solver-thread 5 --max-attempts 120
+```
+
+启用 SQLite 后端：
+
+```bash
+bash ./start_all.sh --threads 3 --count 30 --solver-thread 5 --solver-result-store sqlite --solver-result-db-path logs/solver/solver-results.sqlite3
 ```
 
 禁用代理：

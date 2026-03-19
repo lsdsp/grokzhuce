@@ -1,14 +1,8 @@
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Optional
-
-from dotenv import load_dotenv
 
 from g.proxy_utils import build_requests_proxies
 from grok_runtime import AppConfig, RuntimeContext
-
-
-load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 
 DEFAULT_SITE_URL = "https://accounts.x.ai"
 DEFAULT_IMPERSONATE = "chrome120"

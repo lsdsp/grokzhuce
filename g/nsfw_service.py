@@ -6,15 +6,11 @@ import random
 import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 from urllib.parse import urlparse
 
 from curl_cffi import requests
-from dotenv import load_dotenv
 from .proxy_utils import build_requests_proxies
-
-load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

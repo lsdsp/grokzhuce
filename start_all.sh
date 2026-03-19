@@ -5,6 +5,8 @@ THREADS=""
 COUNT=""
 MAX_ATTEMPTS=""
 SOLVER_THREAD=5
+SOLVER_RESULT_STORE_ARG=""
+SOLVER_RESULT_DB_PATH_ARG=""
 PROXY_HTTP="http://127.0.0.1:10808"
 PROXY_SOCKS="socks5://127.0.0.1:10808"
 NO_PROXY_MODE=0
@@ -19,6 +21,10 @@ while [[ $# -gt 0 ]]; do
       MAX_ATTEMPTS="${2:-}"; shift 2 ;;
     -s|--solver-thread)
       SOLVER_THREAD="${2:-}"; shift 2 ;;
+    --solver-result-store)
+      SOLVER_RESULT_STORE_ARG="${2:-}"; shift 2 ;;
+    --solver-result-db-path)
+      SOLVER_RESULT_DB_PATH_ARG="${2:-}"; shift 2 ;;
     --proxy-http)
       PROXY_HTTP="${2:-}"; shift 2 ;;
     --proxy-socks)
@@ -35,6 +41,8 @@ Options:
   -c, --count <n>           目标注册数量
   -m, --max-attempts <n>    最大尝试次数（可选）
   -s, --solver-thread <n>   solver 线程数（默认 5）
+  --solver-result-store <k> solver 结果存储后端（memory/sqlite）
+  --solver-result-db-path <p> SQLite 数据库路径
   --proxy-http <url>        HTTP/HTTPS 代理（默认 http://127.0.0.1:10808）
   --proxy-socks <url>       SOCKS 代理（默认 socks5://127.0.0.1:10808）
   --no-proxy                禁用代理
@@ -164,15 +172,56 @@ else
   export ALL_PROXY="$PROXY_SOCKS"
 fi
 
+if [[ -n "$SOLVER_RESULT_STORE_ARG" ]] && [[ "$SOLVER_RESULT_STORE_ARG" != "memory" ]] && [[ "$SOLVER_RESULT_STORE_ARG" != "sqlite" ]]; then
+  echo "[-] Invalid --solver-result-store value: $SOLVER_RESULT_STORE_ARG" >&2
+  exit 1
+fi
+
 SOLVER_PID=""
 cleanup() {
   stop_solver || true
+  if [[ -n "${PREV_SOLVER_RESULT_STORE_SET:-}" ]]; then
+    if [[ -n "${PREV_SOLVER_RESULT_STORE_VALUE}" ]]; then
+      export SOLVER_RESULT_STORE="${PREV_SOLVER_RESULT_STORE_VALUE}"
+    else
+      unset SOLVER_RESULT_STORE || true
+    fi
+  fi
+  if [[ -n "${PREV_SOLVER_RESULT_DB_PATH_SET:-}" ]]; then
+    if [[ -n "${PREV_SOLVER_RESULT_DB_PATH_VALUE}" ]]; then
+      export SOLVER_RESULT_DB_PATH="${PREV_SOLVER_RESULT_DB_PATH_VALUE}"
+    else
+      unset SOLVER_RESULT_DB_PATH || true
+    fi
+  fi
 }
 trap cleanup EXIT
 
 if is_solver_ready; then
   log "Solver is already running at http://127.0.0.1:5072"
 else
+  if [[ "${SOLVER_RESULT_STORE+x}" == "x" ]]; then
+    PREV_SOLVER_RESULT_STORE_SET=1
+    PREV_SOLVER_RESULT_STORE_VALUE="${SOLVER_RESULT_STORE}"
+  else
+    PREV_SOLVER_RESULT_STORE_SET=1
+    PREV_SOLVER_RESULT_STORE_VALUE=""
+  fi
+  if [[ "${SOLVER_RESULT_DB_PATH+x}" == "x" ]]; then
+    PREV_SOLVER_RESULT_DB_PATH_SET=1
+    PREV_SOLVER_RESULT_DB_PATH_VALUE="${SOLVER_RESULT_DB_PATH}"
+  else
+    PREV_SOLVER_RESULT_DB_PATH_SET=1
+    PREV_SOLVER_RESULT_DB_PATH_VALUE=""
+  fi
+  if [[ -n "$SOLVER_RESULT_STORE_ARG" ]]; then
+    export SOLVER_RESULT_STORE="$SOLVER_RESULT_STORE_ARG"
+    log "Apply solver result store: ${SOLVER_RESULT_STORE}"
+  fi
+  if [[ -n "$SOLVER_RESULT_DB_PATH_ARG" ]]; then
+    export SOLVER_RESULT_DB_PATH="$SOLVER_RESULT_DB_PATH_ARG"
+    log "Apply solver result DB path: ${SOLVER_RESULT_DB_PATH}"
+  fi
   solver_out="logs/solver/solver.oneclick.${ts}.out.log"
   solver_err="logs/solver/solver.oneclick.${ts}.err.log"
   solver_args=(api_solver.py --browser_type camoufox --thread "$SOLVER_THREAD" --debug)

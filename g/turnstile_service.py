@@ -3,14 +3,10 @@ Turnstile验证服务类
 """
 import os
 import time
-from pathlib import Path
 import requests
 from urllib.parse import urlencode
-from dotenv import load_dotenv
 
 from grok_runtime import LOGGER
-
-load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
 
 class TurnstileService:

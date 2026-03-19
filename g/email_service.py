@@ -2,13 +2,11 @@
 import os
 import re
 import time
-from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import urllib3
-from dotenv import load_dotenv
 from urllib3.exceptions import InsecureRequestWarning
 
 from grok_runtime import LOGGER
@@ -33,7 +31,6 @@ class EmailService:
     CODE_SUBJECT_ALNUM_PATTERN = re.compile(r"\b([A-Z0-9]{3,4}[\-\s]?[A-Z0-9]{3,4})\b", re.IGNORECASE)
 
     def __init__(self):
-        load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
         self.moemail_api_url = os.getenv("MOEMAIL_API_URL", "https://api.moemail.app")
         self.moemail_api_key = os.getenv("MOEMAIL_API_KEY")
         if not self.moemail_api_key:

@@ -3,6 +3,10 @@ import os
 import threading
 import time
 
+from grok_env import load_project_env
+
+load_project_env()
+
 from grok_config import (
     DEFAULT_SITE_KEY,
     DEFAULT_SITE_URL,
