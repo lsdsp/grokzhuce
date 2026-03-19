@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -223,6 +224,29 @@ class GrokRegistrationTests(unittest.TestCase):
 
         self.assertFalse(runner.stop.should_stop())
         self.assertEqual(runner.stage_failures["request_code"], 1)
+
+    def test_fail_rechecks_stage_counter_before_triggering_stage_failure_stop(self):
+        runner = self._build_runner(stage_failure_threshold=1)
+        result = StageResult(False, "request_code", ErrorType.TIMEOUT, True, "未收到验证码")
+        log_entered = threading.Event()
+        resume_log = threading.Event()
+
+        def blocking_log(*args, **kwargs):
+            log_entered.set()
+            self.assertTrue(resume_log.wait(timeout=1))
+
+        with patch.object(runner, "_log", side_effect=blocking_log):
+            worker = threading.Thread(target=runner._fail, args=(result, 1, 1, "demo@example.com"))
+            worker.start()
+            self.assertTrue(log_entered.wait(timeout=1))
+            runner._mark_stage_success("request_code")
+            resume_log.set()
+            worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(runner.stop.should_stop())
+        self.assertEqual(runner.stop.stop_reason, None)
+        self.assertNotIn("request_code", runner.stage_failures)
 
     def test_record_success_masks_sso_when_output_mode_is_masked(self):
         runner = self._build_runner(sso_output_mode="masked")

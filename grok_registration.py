@@ -102,9 +102,15 @@ class GrokRunner:
             error_type=result.error_type.value,
             details=compact_text(result.details),
         )
-        if stage_failures >= threshold and not self.stop.should_stop():
-            self.stage_failure_stop_stage = result.stage
-            self.stop.stop(StopReason.STAGE_FAILURE)
+        should_emit_stage_stop = False
+        with self.stats_lock:
+            current_stage_failures = self.stage_failures.get(result.stage, 0)
+            if current_stage_failures >= threshold and not self.stop.should_stop():
+                self.stage_failure_stop_stage = result.stage
+                self.stop.stop(StopReason.STAGE_FAILURE)
+                should_emit_stage_stop = True
+                stage_failures = current_stage_failures
+        if should_emit_stage_stop:
             self._log(
                 "error",
                 "policy",

@@ -1,4 +1,5 @@
 from db_results import default_result_store
+from urllib.parse import urlsplit, urlunsplit
 
 
 class SolverResultRepository:
@@ -35,6 +36,21 @@ class SolverResultRepository:
     async def cleanup(self, days_old: int = 7):
         return await self.store.cleanup(days_old=days_old)
 
+    @staticmethod
+    def _redact_proxy_value(proxy):
+        if not isinstance(proxy, str) or "@" not in proxy:
+            return proxy
+        if "://" not in proxy:
+            credentials, host = proxy.rsplit("@", 1)
+            redacted = "***:***" if ":" in credentials else "***"
+            return f"{redacted}@{host}"
+        parts = urlsplit(proxy)
+        if "@" not in parts.netloc:
+            return proxy
+        credentials, host = parts.netloc.rsplit("@", 1)
+        redacted = "***:***" if ":" in credentials else "***"
+        return urlunsplit((parts.scheme, f"{redacted}@{host}", parts.path, parts.query, parts.fragment))
+
     def build_result_payload(self, result):
         if not result:
             return {
@@ -54,7 +70,10 @@ class SolverResultRepository:
                 diagnostics = {}
                 for key in ("failure_reason", "failed_stage", "browser_index", "proxy", "elapsed_time", "browser_name", "browser_version"):
                     if key in result and result.get(key) not in (None, ""):
-                        diagnostics[key] = result.get(key)
+                        value = result.get(key)
+                        if key == "proxy":
+                            value = self._redact_proxy_value(value)
+                        diagnostics[key] = value
                 if diagnostics:
                     payload["diagnostics"] = diagnostics
                 return payload
