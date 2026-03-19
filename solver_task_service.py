@@ -6,6 +6,8 @@ import time
 import uuid
 from typing import Optional
 
+from solver_result_repository import redact_proxy_value
+
 
 class TurnstileTaskService:
     def __init__(
@@ -68,11 +70,12 @@ class TurnstileTaskService:
 
     async def _save_failure(self, task_id: str, *, elapsed_time: float, failed_stage: str, failure_reason, browser_index=None, proxy=None, browser_config=None):
         normalized_reason = self._normalize_failure_reason(failure_reason)
+        redacted_proxy = redact_proxy_value(proxy)
         diagnostics = {
             "failure_reason": normalized_reason,
             "failed_stage": failed_stage,
             "browser_index": browser_index,
-            "proxy": proxy,
+            "proxy": redacted_proxy,
         }
         if isinstance(browser_config, dict):
             diagnostics["browser_name"] = browser_config.get("browser_name")
@@ -86,7 +89,7 @@ class TurnstileTaskService:
             browser_index=browser_index,
             failed_stage=failed_stage,
             failure_reason=normalized_reason,
-            proxy=proxy,
+            proxy=redacted_proxy,
             latency_ms=int(elapsed_time * 1000),
             error_type="captcha",
             browser_name=diagnostics.get("browser_name"),

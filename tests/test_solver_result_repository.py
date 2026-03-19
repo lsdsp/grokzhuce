@@ -59,6 +59,21 @@ class SolverResultRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["diagnostics"]["proxy"], "http://***:***@proxy.example:8080")
         self.assertNotIn("user:pass@", payload["diagnostics"]["proxy"])
 
+    async def test_build_result_payload_redacts_colon_format_proxy_credentials(self):
+        from solver_result_repository import SolverResultRepository
+
+        repo = SolverResultRepository()
+        payload = repo.build_result_payload(
+            {
+                "value": "CAPTCHA_FAIL",
+                "failure_reason": "proxy_auth_failed",
+                "proxy": "http:127.0.0.1:8080:user:pass",
+            }
+        )
+
+        self.assertEqual(payload["diagnostics"]["proxy"], "http:127.0.0.1:8080:***:***")
+        self.assertNotIn("user:pass", payload["diagnostics"]["proxy"])
+
     async def test_build_result_payload_returns_processing_for_pending_status(self):
         from solver_result_repository import SolverResultRepository
 

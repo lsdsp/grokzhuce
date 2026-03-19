@@ -224,6 +224,47 @@ class SolverTaskServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failure_call.kwargs["error_type"], "captcha")
         self.assertEqual(failure_call.kwargs["failed_stage"], "navigate")
 
+    async def test_save_failure_redacts_proxy_before_emitting_structured_event(self):
+        repository = SolverResultRepository(store=InMemorySolverResultStore())
+        await repository.init()
+        event_logger = Mock()
+
+        pool_manager = Mock()
+        pool_manager.proxy_support = False
+        pool_manager.browser_type = "camoufox"
+        pool_manager.base_dir = "."
+        pool_manager.browser_pool = asyncio.Queue()
+        pool_manager.return_or_replace_browser = AsyncMock()
+        pool_manager.spawn_browser_for_config = AsyncMock()
+
+        service = TurnstileTaskService(
+            pool_manager=pool_manager,
+            repository=repository,
+            logger=Mock(),
+            event_logger=event_logger,
+            colors={"MAGENTA": "", "RESET": "", "GREEN": "", "RED": ""},
+            debug=False,
+            antishadow_inject=AsyncMock(),
+            block_rendering=AsyncMock(),
+            unblock_rendering=AsyncMock(),
+            inject_captcha_directly=AsyncMock(),
+            try_click_strategies=AsyncMock(return_value=True),
+        )
+
+        await service._save_failure(
+            "task-proxy",
+            elapsed_time=1.0,
+            failed_stage="navigate",
+            failure_reason="proxy_auth_failed",
+            browser_index=2,
+            proxy="http:127.0.0.1:8080:user:pass",
+        )
+
+        failure_call = event_logger.event.call_args
+        self.assertEqual(failure_call.args[:3], ("error", "solver_failure", "captcha solve failed"))
+        self.assertEqual(failure_call.kwargs["proxy"], "http:127.0.0.1:8080:***:***")
+        self.assertNotIn("user:pass", failure_call.kwargs["proxy"])
+
 
 if __name__ == "__main__":
     unittest.main()

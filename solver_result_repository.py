@@ -2,6 +2,27 @@ from db_results import default_result_store
 from urllib.parse import urlsplit, urlunsplit
 
 
+def redact_proxy_value(proxy):
+    if not isinstance(proxy, str) or not proxy:
+        return proxy
+    if "@" in proxy:
+        if "://" not in proxy:
+            credentials, host = proxy.rsplit("@", 1)
+            redacted = "***:***" if ":" in credentials else "***"
+            return f"{redacted}@{host}"
+        parts = urlsplit(proxy)
+        if "@" not in parts.netloc:
+            return proxy
+        credentials, host = parts.netloc.rsplit("@", 1)
+        redacted = "***:***" if ":" in credentials else "***"
+        return urlunsplit((parts.scheme, f"{redacted}@{host}", parts.path, parts.query, parts.fragment))
+    parts = proxy.split(":")
+    if len(parts) == 5:
+        proxy_scheme, proxy_ip, proxy_port, _proxy_user, _proxy_pass = parts
+        return f"{proxy_scheme}:{proxy_ip}:{proxy_port}:***:***"
+    return proxy
+
+
 class SolverResultRepository:
     def __init__(self, store=None):
         self.store = store or default_result_store
@@ -38,18 +59,7 @@ class SolverResultRepository:
 
     @staticmethod
     def _redact_proxy_value(proxy):
-        if not isinstance(proxy, str) or "@" not in proxy:
-            return proxy
-        if "://" not in proxy:
-            credentials, host = proxy.rsplit("@", 1)
-            redacted = "***:***" if ":" in credentials else "***"
-            return f"{redacted}@{host}"
-        parts = urlsplit(proxy)
-        if "@" not in parts.netloc:
-            return proxy
-        credentials, host = parts.netloc.rsplit("@", 1)
-        redacted = "***:***" if ":" in credentials else "***"
-        return urlunsplit((parts.scheme, f"{redacted}@{host}", parts.path, parts.query, parts.fragment))
+        return redact_proxy_value(proxy)
 
     def build_result_payload(self, result):
         if not result:
