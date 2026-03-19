@@ -31,6 +31,7 @@ class ErrorType(str, Enum):
 class StopReason(str, Enum):
     TARGET_REACHED = "target_reached"
     ATTEMPT_LIMIT = "attempt_limit"
+    STAGE_FAILURE = "stage_failure"
     EXTERNAL_STOP = "external_stop"
 
 
@@ -44,6 +45,9 @@ class AppConfig:
     output_file: str
     proxies: Dict[str, str]
     metrics_path: str
+    sso_output_mode: str = "plain"
+    sso_encryption_passphrase: str = ""
+    stage_failure_threshold: int = 20
 
 
 @dataclass
@@ -118,6 +122,12 @@ class StopPolicy:
                 self.stop_reason = StopReason.TARGET_REACHED
                 self.stop_event.set()
             return self.success_count
+
+    def stop(self, reason: StopReason):
+        with self._lock:
+            if self.stop_reason is None:
+                self.stop_reason = reason
+            self.stop_event.set()
 
     def should_stop(self) -> bool:
         return self.stop_event.is_set()

@@ -184,6 +184,14 @@ class EmailServiceOpenApiFlowTests(unittest.TestCase):
         self.assertTrue(captured_json)
         self.assertEqual(captured_json[0].get("expiryTime"), EmailService.DEFAULT_EMAIL_EXPIRY_MS)
 
+    def test_create_address_returns_email_only(self):
+        service = self._new_service()
+
+        with patch.object(service, "_create_address_impl", return_value="demo@mtmc.top"):
+            email = service.create_address()
+
+        self.assertEqual(email, "demo@mtmc.top")
+
     def test_create_email_logs_when_all_openapi_attempts_fail(self):
         service = self._new_service()
 

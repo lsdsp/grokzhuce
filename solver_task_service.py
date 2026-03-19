@@ -1,9 +1,12 @@
 import asyncio
 import os
 import random
+import re
 import time
 import uuid
 from typing import Optional
+
+from solver_result_repository import redact_proxy_value
 
 
 class TurnstileTaskService:
@@ -13,6 +16,7 @@ class TurnstileTaskService:
         pool_manager,
         repository,
         logger,
+        event_logger,
         colors,
         debug: bool,
         antishadow_inject,
@@ -24,6 +28,7 @@ class TurnstileTaskService:
         self.pool_manager = pool_manager
         self.repository = repository
         self.logger = logger
+        self.event_logger = event_logger
         self.colors = colors
         self.debug = debug
         self.antishadow_inject = antishadow_inject
@@ -35,6 +40,15 @@ class TurnstileTaskService:
     async def enqueue_task(self, *, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None) -> str:
         task_id = str(uuid.uuid4())
         await self.repository.save_pending(task_id, url=url, sitekey=sitekey, action=action, cdata=cdata)
+        self._emit_event(
+            "info",
+            "solver_enqueue",
+            "captcha task enqueued",
+            task_id=task_id,
+            error_type="none",
+            sitekey=sitekey,
+            action=action,
+        )
         asyncio.create_task(self.solve_turnstile(task_id=task_id, url=url, sitekey=sitekey, action=action, cdata=cdata))
         return task_id
 
@@ -42,21 +56,77 @@ class TurnstileTaskService:
         result = await self.repository.load(task_id)
         return self.repository.build_result_payload(result)
 
+    @staticmethod
+    def _normalize_failure_reason(value) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+        return text or "unknown_failure"
+
+    def _emit_event(self, level: str, stage: str, message: str, **fields):
+        if self.event_logger is None:
+            return
+        clean_fields = {key: value for key, value in fields.items() if value not in (None, "")}
+        try:
+            self.event_logger.event(level, stage, message, **clean_fields)
+        except Exception as exc:
+            try:
+                self.logger.warning(f"solver event logging failed at {stage}: {exc}")
+            except Exception:
+                pass
+
+    async def _save_failure(self, task_id: str, *, elapsed_time: float, failed_stage: str, failure_reason, browser_index=None, proxy=None, browser_config=None):
+        normalized_reason = self._normalize_failure_reason(failure_reason)
+        redacted_proxy = redact_proxy_value(proxy)
+        diagnostics = {
+            "failure_reason": normalized_reason,
+            "failed_stage": failed_stage,
+            "browser_index": browser_index,
+            "proxy": redacted_proxy,
+        }
+        if isinstance(browser_config, dict):
+            diagnostics["browser_name"] = browser_config.get("browser_name")
+            diagnostics["browser_version"] = browser_config.get("browser_version")
+        await self.repository.save_failure(task_id, elapsed_time=elapsed_time, **diagnostics)
+        self._emit_event(
+            "error",
+            "solver_failure",
+            "captcha solve failed",
+            task_id=task_id,
+            browser_index=browser_index,
+            failed_stage=failed_stage,
+            failure_reason=normalized_reason,
+            proxy=redacted_proxy,
+            latency_ms=int(elapsed_time * 1000),
+            error_type="captcha",
+            browser_name=diagnostics.get("browser_name"),
+            browser_version=diagnostics.get("browser_version"),
+        )
+
     async def solve_turnstile(self, task_id: str, url: str, sitekey: str, action: Optional[str] = None, cdata: Optional[str] = None):
         proxy = None
         context = None
         start_time = time.time()
+        current_stage = "acquire_browser"
 
         index, browser, browser_config = await self.pool_manager.browser_pool.get()
 
         try:
             try:
+                current_stage = "check_browser_connection"
                 if hasattr(browser, "is_connected") and not browser.is_connected():
                     if self.debug:
                         self.logger.warning(f"Browser {index}: Browser disconnected, recreating")
+                    current_stage = "replace_browser"
                     replacement = await self.pool_manager.spawn_browser_for_config(index=index, config=browser_config)
                     if not replacement:
-                        await self.repository.save_failure(task_id, elapsed_time=0)
+                        await self._save_failure(
+                            task_id,
+                            elapsed_time=0,
+                            failed_stage=current_stage,
+                            failure_reason="replacement_browser_unavailable",
+                            browser_index=index,
+                            browser_config=browser_config,
+                        )
                         return
                     browser = replacement
                     if self.debug:
@@ -70,6 +140,7 @@ class TurnstileTaskService:
                 context_options["extra_http_headers"] = {"sec-ch-ua": browser_config["sec_ch_ua"]}
 
             if self.pool_manager.proxy_support:
+                current_stage = "load_proxy"
                 proxy_file_path = os.path.join(self.pool_manager.base_dir, "proxies.txt")
                 try:
                     with open(proxy_file_path, encoding="utf-8") as proxy_file:
@@ -126,12 +197,17 @@ class TurnstileTaskService:
                 elif self.debug:
                     self.logger.debug(f"Browser {index}: Creating context without proxy")
 
+            current_stage = "create_context"
             context = await browser.new_context(**context_options)
+            current_stage = "create_page"
             page = await context.new_page()
 
+            current_stage = "inject_antishadow"
             await self.antishadow_inject(page)
+            current_stage = "block_rendering"
             await self.block_rendering(page)
 
+            current_stage = "inject_init_script"
             await page.add_init_script(
                 """
             Object.defineProperty(navigator, 'webdriver', {
@@ -159,13 +235,17 @@ class TurnstileTaskService:
                 self.logger.debug(f"Browser {index}: Setting up optimized page loading with resource blocking")
                 self.logger.debug(f"Browser {index}: Loading real website directly: {url}")
 
+            current_stage = "navigate"
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            current_stage = "unblock_rendering"
             await self.unblock_rendering(page)
 
             if self.debug:
                 self.logger.debug(f"Browser {index}: Injecting Turnstile widget directly into target site")
 
+            current_stage = "inject_captcha"
             await self.inject_captcha_directly(page, sitekey, action or "", cdata or "", index)
+            current_stage = "wait_after_inject"
             await asyncio.sleep(3)
 
             locator = page.locator('input[name="cf-turnstile-response"]')
@@ -173,6 +253,7 @@ class TurnstileTaskService:
             click_count = 0
             max_clicks = 10
 
+            current_stage = "poll_for_token"
             for attempt in range(max_attempts):
                 try:
                     try:
@@ -196,6 +277,17 @@ class TurnstileTaskService:
                                     f"{self.colors.get('GREEN')}{elapsed_time}{self.colors.get('RESET')} Seconds"
                                 )
                                 await self.repository.save_token(task_id, token=token, elapsed_time=elapsed_time)
+                                self._emit_event(
+                                    "info",
+                                    "solver_success",
+                                    "captcha solved",
+                                    task_id=task_id,
+                                    browser_index=index,
+                                    latency_ms=int(elapsed_time * 1000),
+                                    error_type="none",
+                                    browser_name=browser_config.get("browser_name"),
+                                    browser_version=browser_config.get("browser_version"),
+                                )
                                 return
                         except Exception as exc:
                             if self.debug:
@@ -215,6 +307,17 @@ class TurnstileTaskService:
                                         f"{self.colors.get('GREEN')}{elapsed_time}{self.colors.get('RESET')} Seconds"
                                     )
                                     await self.repository.save_token(task_id, token=element_token, elapsed_time=elapsed_time)
+                                    self._emit_event(
+                                        "info",
+                                        "solver_success",
+                                        "captcha solved",
+                                        task_id=task_id,
+                                        browser_index=index,
+                                        latency_ms=int(elapsed_time * 1000),
+                                        error_type="none",
+                                        browser_name=browser_config.get("browser_name"),
+                                        browser_version=browser_config.get("browser_version"),
+                                    )
                                     return
                             except Exception as exc:
                                 if self.debug:
@@ -246,7 +349,15 @@ class TurnstileTaskService:
                     continue
 
             elapsed_time = round(time.time() - start_time, 3)
-            await self.repository.save_failure(task_id, elapsed_time=elapsed_time)
+            await self._save_failure(
+                task_id,
+                elapsed_time=elapsed_time,
+                failed_stage=current_stage,
+                failure_reason="token_not_found",
+                browser_index=index,
+                proxy=proxy,
+                browser_config=browser_config,
+            )
             if self.debug:
                 self.logger.error(
                     f"Browser {index}: Error solving Turnstile in "
@@ -254,7 +365,15 @@ class TurnstileTaskService:
                 )
         except Exception as exc:
             elapsed_time = round(time.time() - start_time, 3)
-            await self.repository.save_failure(task_id, elapsed_time=elapsed_time)
+            await self._save_failure(
+                task_id,
+                elapsed_time=elapsed_time,
+                failed_stage=current_stage,
+                failure_reason=exc,
+                browser_index=index,
+                proxy=proxy,
+                browser_config=browser_config,
+            )
             if self.debug:
                 self.logger.error(f"Browser {index}: Error solving Turnstile: {str(exc)}")
         finally:

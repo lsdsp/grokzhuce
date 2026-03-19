@@ -1,9 +1,9 @@
 param(
     [switch]$NoProxy,
-    [string]$ProxyHttp = "http://127.0.0.1:10808",
-    [string]$ProxySocks = "socks5://127.0.0.1:10808",
-    [int]$SolverThread = 2,
-    [int]$ReadyTimeoutSec = 90
+    [string]$ProxyHttp = "",
+    [string]$ProxySocks = "",
+    [Nullable[int]]$SolverThread = $null,
+    [Nullable[int]]$ReadyTimeoutSec = $null
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,6 +33,38 @@ function Clear-ProxyEnvironment {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
         }
     }
+}
+
+function Get-OneClickSharedDefaults {
+    param(
+        [string]$PythonPath,
+        [string]$ProjectRoot
+    )
+
+    $helperPath = Join-Path $ProjectRoot "oneclick_shared.py"
+    $settings = @{}
+    # oneclick_shared.py defaults
+    foreach ($line in & $PythonPath $helperPath defaults) {
+        if ([string]::IsNullOrWhiteSpace($line) -or ($line -notmatch "=")) {
+            continue
+        }
+        $parts = $line -split "=", 2
+        $settings[$parts[0]] = $parts[1]
+    }
+    return $settings
+}
+
+function Get-SharedDefaultValue {
+    param(
+        [hashtable]$Defaults,
+        [string]$Key,
+        [string]$Fallback
+    )
+
+    if ($Defaults.ContainsKey($Key) -and -not [string]::IsNullOrWhiteSpace($Defaults[$Key])) {
+        return $Defaults[$Key]
+    }
+    return $Fallback
 }
 
 function Test-SolverReady {
@@ -80,9 +112,33 @@ function Restore-SolverStoreEnvironment {
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
-$logRoot = Join-Path $projectRoot "logs"
-$solverLogDir = Join-Path $logRoot "solver"
-$oneclickLogDir = Join-Path $logRoot "oneclick"
+$pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $pythonPath)) {
+    $pythonPath = "python"
+}
+
+$sharedDefaults = Get-OneClickSharedDefaults -PythonPath $pythonPath -ProjectRoot $projectRoot
+$defaultSmokeSolverThread = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_SMOKE_SOLVER_THREAD" -Fallback "2")
+$defaultProxyHttp = Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_PROXY_HTTP" -Fallback ""
+$defaultProxySocks = Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_PROXY_SOCKS" -Fallback ""
+$defaultReadyTimeoutSec = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "SMOKE_READY_TIMEOUT_SEC" -Fallback "90")
+
+if ($null -eq $SolverThread) {
+    $SolverThread = $defaultSmokeSolverThread
+}
+if ($null -eq $ReadyTimeoutSec) {
+    $ReadyTimeoutSec = $defaultReadyTimeoutSec
+}
+if ([string]::IsNullOrWhiteSpace($ProxyHttp)) {
+    $ProxyHttp = $defaultProxyHttp
+}
+if ([string]::IsNullOrWhiteSpace($ProxySocks)) {
+    $ProxySocks = $defaultProxySocks
+}
+
+$logRoot = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_ROOT_DIR" -Fallback "logs")
+$solverLogDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_SOLVER_DIR" -Fallback "logs/solver")
+$oneclickLogDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_ONECLICK_DIR" -Fallback "logs/oneclick")
 foreach ($dir in @($logRoot, $solverLogDir, $oneclickLogDir)) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
 }
@@ -90,11 +146,6 @@ foreach ($dir in @($logRoot, $solverLogDir, $oneclickLogDir)) {
 $ts = Get-Date -Format "yyyyMMdd-HHmmss"
 $script:smokeLogFile = Join-Path $oneclickLogDir "release_smoke.$ts.log"
 New-Item -ItemType File -Path $script:smokeLogFile -Force | Out-Null
-
-$pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path $pythonPath)) {
-    $pythonPath = "python"
-}
 
 if ($NoProxy) {
     Write-Step "Proxy disabled by -NoProxy"

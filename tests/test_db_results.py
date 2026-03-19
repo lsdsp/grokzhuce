@@ -2,7 +2,15 @@ import unittest
 from importlib import reload
 from unittest.mock import patch
 
-from db_results import cleanup_old_results, load_result, results_db, save_result
+from db_results import (
+    DEFAULT_RESULT_STORE,
+    cleanup_old_results,
+    load_result,
+    load_solver_result,
+    results_db,
+    save_result,
+    save_solver_result,
+)
 
 
 class DbResultsTests(unittest.IsolatedAsyncioTestCase):
@@ -46,6 +54,15 @@ class DbResultsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reloaded.default_result_store.__class__.__name__, "SQLiteSolverResultStore")
         with patch.dict("os.environ", {"SOLVER_RESULT_STORE": "memory"}, clear=False):
             reload(db_results)
+
+    async def test_new_solver_result_aliases_share_default_store(self):
+        self.assertIsNotNone(DEFAULT_RESULT_STORE)
+
+        await save_solver_result("task-2", "turnstile", {"value": "token-xyz", "createTime": 456})
+        result = await load_solver_result("task-2")
+
+        self.assertEqual(result["value"], "token-xyz")
+        self.assertEqual(result["createTime"], 456)
 
 
 if __name__ == "__main__":

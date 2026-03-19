@@ -1,6 +1,9 @@
 import random
 
-class browser_config:
+
+class BrowserConfig:
+    """浏览器指纹配置提供器。"""
+
     @staticmethod
     def get_random_browser_config(browser_type):
         # 返回: 浏览器名, 版本, User-Agent, Sec-CH-UA
@@ -15,3 +18,7 @@ class browser_config:
         ua = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
         sec_ch_ua = f'"Google Chrome";v="{version}", "Chromium";v="{version}"'
         return ua, sec_ch_ua
+
+
+# 兼容旧调用方：保留历史类名别名。
+browser_config = BrowserConfig

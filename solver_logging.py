@@ -1,6 +1,9 @@
 import logging
+import os
 import sys
 import time
+
+from grok_runtime import JsonlLogger
 
 
 COLORS = {
@@ -42,3 +45,8 @@ def get_solver_logger(name: str = "TurnstileAPIServer") -> CustomLogger:
     if not any(isinstance(handler, logging.StreamHandler) and getattr(handler, "stream", None) is sys.stdout for handler in logger.handlers):
         logger.addHandler(logging.StreamHandler(sys.stdout))
     return logger  # type: ignore[return-value]
+
+
+def get_solver_event_logger(path: str | None = None) -> JsonlLogger:
+    metrics_path = path or os.getenv("SOLVER_METRICS_PATH", "logs/solver/metrics.jsonl").strip() or "logs/solver/metrics.jsonl"
+    return JsonlLogger(metrics_path)

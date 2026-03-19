@@ -1,12 +1,12 @@
-﻿param(
+param(
     [Nullable[int]]$Threads = $null,
     [Nullable[int]]$Count = $null,
     [Nullable[int]]$MaxAttempts = $null,
-    [int]$SolverThread = 5,
+    [Nullable[int]]$SolverThread = $null,
     [string]$SolverResultStore = "",
     [string]$SolverResultDbPath = "",
-    [string]$ProxyHttp = "http://127.0.0.1:10808",
-    [string]$ProxySocks = "socks5://127.0.0.1:10808",
+    [string]$ProxyHttp = "",
+    [string]$ProxySocks = "",
     [switch]$NoProxy
 )
 
@@ -62,6 +62,49 @@ function Clear-ProxyEnvironment {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
         }
     }
+}
+
+function Get-OneClickSharedDefaults {
+    param(
+        [string]$PythonPath,
+        [string]$ProjectRoot
+    )
+
+    $helperPath = Join-Path $ProjectRoot "oneclick_shared.py"
+    $settings = @{}
+    # oneclick_shared.py defaults
+    foreach ($line in & $PythonPath $helperPath defaults) {
+        if ([string]::IsNullOrWhiteSpace($line) -or ($line -notmatch "=")) {
+            continue
+        }
+        $parts = $line -split "=", 2
+        $settings[$parts[0]] = $parts[1]
+    }
+    return $settings
+}
+
+function Get-GrokFailurePatterns {
+    param(
+        [string]$PythonPath,
+        [string]$ProjectRoot
+    )
+
+    $helperPath = Join-Path $ProjectRoot "oneclick_shared.py"
+    # oneclick_shared.py failure-patterns
+    return @(& $PythonPath $helperPath failure-patterns | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Get-SharedDefaultValue {
+    param(
+        [hashtable]$Defaults,
+        [string]$Key,
+        [string]$Fallback
+    )
+
+    if ($Defaults.ContainsKey($Key) -and -not [string]::IsNullOrWhiteSpace($Defaults[$Key])) {
+        return $Defaults[$Key]
+    }
+    return $Fallback
 }
 
 function Set-SolverStoreEnvironment {
@@ -147,7 +190,7 @@ function Get-SolverProcessIds {
 }
 
 function Stop-SolverWithTimeout {
-    param([int]$TimeoutSec = 180)
+    param([int]$TimeoutSec)
 
     Write-Step "Stopping solver (timeout ${TimeoutSec}s)..."
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
@@ -211,23 +254,8 @@ function Show-GrokFailureSummary {
         return
     }
 
-    $patterns = @(
-        "ATTEMPT_LIMIT_REACHED",
-        "已达到最大尝试上限",
-        "初始化扫描失败",
-        "未找到 Action ID",
-        "服务初始化失败",
-        "Traceback",
-        "ModuleNotFoundError",
-        "TLS connect error",
-        "Connection timed out",
-        "Resolving timed out",
-        "SSLError",
-        "Timeout"
-    )
-
     $summaryLines = @()
-    foreach ($p in $patterns) {
+    foreach ($p in $script:grokFailurePatterns) {
         $match = Select-String -Path $LogPath -Pattern $p -SimpleMatch | Select-Object -Last 1
         if ($match) {
             $summaryLines += $match.Line.Trim()
@@ -252,11 +280,37 @@ function Show-GrokFailureSummary {
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
-$logRoot = Join-Path $projectRoot "logs"
-$logSolverDir = Join-Path $logRoot "solver"
-$logGrokDir = Join-Path $logRoot "grok"
-$logOneClickDir = Join-Path $logRoot "oneclick"
-$logOthersDir = Join-Path $logRoot "others"
+$pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $pythonPath)) {
+    $pythonPath = "python"
+}
+
+$sharedDefaults = Get-OneClickSharedDefaults -PythonPath $pythonPath -ProjectRoot $projectRoot
+$script:grokFailurePatterns = Get-GrokFailurePatterns -PythonPath $pythonPath -ProjectRoot $projectRoot
+
+$defaultThreads = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_THREADS" -Fallback "3")
+$defaultCount = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_COUNT" -Fallback "5")
+$defaultSolverThread = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_SOLVER_THREAD" -Fallback "5")
+$solverReadyTimeoutSec = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "SOLVER_READY_TIMEOUT_SEC" -Fallback "60")
+$solverStopTimeoutSec = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "SOLVER_STOP_TIMEOUT_SEC" -Fallback "180")
+$defaultProxyHttp = Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_PROXY_HTTP" -Fallback ""
+$defaultProxySocks = Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_PROXY_SOCKS" -Fallback ""
+
+if ($null -eq $SolverThread) {
+    $SolverThread = $defaultSolverThread
+}
+if ([string]::IsNullOrWhiteSpace($ProxyHttp)) {
+    $ProxyHttp = $defaultProxyHttp
+}
+if ([string]::IsNullOrWhiteSpace($ProxySocks)) {
+    $ProxySocks = $defaultProxySocks
+}
+
+$logRoot = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_ROOT_DIR" -Fallback "logs")
+$logSolverDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_SOLVER_DIR" -Fallback "logs/solver")
+$logGrokDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_GROK_DIR" -Fallback "logs/grok")
+$logOneClickDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_ONECLICK_DIR" -Fallback "logs/oneclick")
+$logOthersDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_OTHERS_DIR" -Fallback "logs/others")
 foreach ($dir in @($logRoot, $logSolverDir, $logGrokDir, $logOneClickDir, $logOthersDir)) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
 }
@@ -264,17 +318,31 @@ $runTimestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $script:oneclickLogFile = Join-Path $logOneClickDir "start_all.$runTimestamp.log"
 New-Item -ItemType File -Path $script:oneclickLogFile -Force | Out-Null
 
-$pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
-if (-not (Test-Path $pythonPath)) {
-    $pythonPath = "python"
-}
-
 if ($NoProxy) {
     Write-Step "Proxy disabled by -NoProxy."
     Clear-ProxyEnvironment
 } else {
     Write-Step "Applying local proxy: $ProxyHttp / $ProxySocks"
     Set-ProxyEnvironment -Http $ProxyHttp -Socks $ProxySocks
+}
+
+$threadsProvided = $PSBoundParameters.ContainsKey("Threads")
+$countProvided = $PSBoundParameters.ContainsKey("Count")
+if ($threadsProvided -and $Threads -le 0) {
+    Write-Error "Invalid -Threads value: $Threads. It must be a positive integer."
+    exit 1
+}
+if ($countProvided -and $Count -le 0) {
+    Write-Error "Invalid -Count value: $Count. It must be a positive integer."
+    exit 1
+}
+if ($PSBoundParameters.ContainsKey("MaxAttempts") -and $MaxAttempts -le 0) {
+    Write-Error "Invalid -MaxAttempts value: $MaxAttempts. It must be a positive integer."
+    exit 1
+}
+if ($PSBoundParameters.ContainsKey("SolverThread") -and $SolverThread -le 0) {
+    Write-Error "Invalid -SolverThread value: $SolverThread. It must be a positive integer."
+    exit 1
 }
 
 if (Test-SolverReady) {
@@ -307,7 +375,7 @@ if (Test-SolverReady) {
     Write-Step "Solver logs: $solverOut / $solverErr"
 
     $ready = $false
-    for ($i = 1; $i -le 60; $i++) {
+    for ($i = 1; $i -le $solverReadyTimeoutSec; $i++) {
         Start-Sleep -Seconds 1
         if (Test-SolverReady) {
             $ready = $true
@@ -316,30 +384,12 @@ if (Test-SolverReady) {
     }
 
     if (-not $ready) {
-        Write-Step "Solver not ready within 60 seconds; starting cleanup."
-        [void](Stop-SolverWithTimeout -TimeoutSec 180)
-        Write-Error "Solver did not become ready on port 5072 within 60 seconds."
+        Write-Step "Solver not ready within $solverReadyTimeoutSec seconds; starting cleanup."
+        [void](Stop-SolverWithTimeout -TimeoutSec $solverStopTimeoutSec)
+        Write-Error "Solver did not become ready on port 5072 within $solverReadyTimeoutSec seconds."
         exit 1
     }
     Write-Step "Solver is ready."
-}
-
-$defaultThreads = 3
-$defaultCount = 5
-$threadsProvided = $PSBoundParameters.ContainsKey("Threads")
-$countProvided = $PSBoundParameters.ContainsKey("Count")
-
-if ($threadsProvided -and $Threads -le 0) {
-    Write-Error "Invalid -Threads value: $Threads. It must be a positive integer."
-    exit 1
-}
-if ($countProvided -and $Count -le 0) {
-    Write-Error "Invalid -Count value: $Count. It must be a positive integer."
-    exit 1
-}
-if ($PSBoundParameters.ContainsKey("MaxAttempts") -and $MaxAttempts -le 0) {
-    Write-Error "Invalid -MaxAttempts value: $MaxAttempts. It must be a positive integer."
-    exit 1
 }
 
 if (-not $threadsProvided) {
@@ -375,18 +425,7 @@ try {
         $attemptLimitHit =
             (Select-String -Path $grokOut -Pattern "ATTEMPT_LIMIT_REACHED" -SimpleMatch -Quiet) -or
             (Select-String -Path $grokOut -Pattern "已达到最大尝试上限" -SimpleMatch -Quiet)
-        foreach ($hint in @(
-            "初始化扫描失败",
-            "未找到 Action ID",
-            "服务初始化失败",
-            "Traceback",
-            "ModuleNotFoundError",
-            "TLS connect error",
-            "Connection timed out",
-            "Resolving timed out",
-            "SSLError",
-            "Timeout"
-        )) {
+        foreach ($hint in $script:grokFailurePatterns) {
             if (Select-String -Path $grokOut -Pattern $hint -SimpleMatch -Quiet) {
                 $hasFailurePattern = $true
                 break
@@ -397,11 +436,10 @@ try {
         Show-GrokFailureSummary -LogPath $grokOut
     }
 } finally {
-    $stopped = Stop-SolverWithTimeout -TimeoutSec 180
+    $stopped = Stop-SolverWithTimeout -TimeoutSec $solverStopTimeoutSec
     Restore-SolverStoreEnvironment
     if (-not $stopped -and $exitCode -eq 0) {
         $exitCode = 1
     }
 }
 exit $exitCode
-

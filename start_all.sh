@@ -4,12 +4,13 @@ set -euo pipefail
 THREADS=""
 COUNT=""
 MAX_ATTEMPTS=""
-SOLVER_THREAD=5
+SOLVER_THREAD=""
 SOLVER_RESULT_STORE_ARG=""
 SOLVER_RESULT_DB_PATH_ARG=""
-PROXY_HTTP="http://127.0.0.1:10808"
-PROXY_SOCKS="socks5://127.0.0.1:10808"
+PROXY_HTTP=""
+PROXY_SOCKS=""
 NO_PROXY_MODE=0
+GROK_FAILURE_PATTERNS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -40,11 +41,11 @@ Options:
   -t, --threads <n>         grok 并发线程数
   -c, --count <n>           目标注册数量
   -m, --max-attempts <n>    最大尝试次数（可选）
-  -s, --solver-thread <n>   solver 线程数（默认 5）
+  -s, --solver-thread <n>   solver 线程数（默认读取共享约定）
   --solver-result-store <k> solver 结果存储后端（memory/sqlite）
   --solver-result-db-path <p> SQLite 数据库路径
-  --proxy-http <url>        HTTP/HTTPS 代理（默认 http://127.0.0.1:10808）
-  --proxy-socks <url>       SOCKS 代理（默认 socks5://127.0.0.1:10808）
+  --proxy-http <url>        HTTP/HTTPS 代理（默认读取共享约定）
+  --proxy-socks <url>       SOCKS 代理（默认读取共享约定）
   --no-proxy                禁用代理
 USAGE
       exit 0 ;;
@@ -56,11 +57,6 @@ done
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$project_root"
-
-mkdir -p logs/solver logs/grok logs/oneclick logs/others
-ts="$(date +"%Y%m%d-%H%M%S")"
-oneclick_log="logs/oneclick/start_all.${ts}.log"
-touch "$oneclick_log"
 
 log() {
   local line
@@ -103,6 +99,37 @@ find_python() {
   echo ""
 }
 
+load_shared_defaults() {
+  local key value
+  # oneclick_shared.py defaults
+  while IFS='=' read -r key value; do
+    [[ -z "${key}" ]] && continue
+    case "$key" in
+      DEFAULT_THREADS) DEFAULT_THREADS="$value" ;;
+      DEFAULT_COUNT) DEFAULT_COUNT="$value" ;;
+      DEFAULT_SOLVER_THREAD) DEFAULT_SOLVER_THREAD="$value" ;;
+      DEFAULT_PROXY_HTTP) DEFAULT_PROXY_HTTP="$value" ;;
+      DEFAULT_PROXY_SOCKS) DEFAULT_PROXY_SOCKS="$value" ;;
+      SOLVER_READY_TIMEOUT_SEC) SOLVER_READY_TIMEOUT_SEC="$value" ;;
+      SOLVER_STOP_TIMEOUT_SEC) SOLVER_STOP_TIMEOUT_SEC="$value" ;;
+      LOG_ROOT_DIR) LOG_ROOT_DIR="$value" ;;
+      LOG_SOLVER_DIR) LOG_SOLVER_DIR="$value" ;;
+      LOG_GROK_DIR) LOG_GROK_DIR="$value" ;;
+      LOG_ONECLICK_DIR) LOG_ONECLICK_DIR="$value" ;;
+      LOG_OTHERS_DIR) LOG_OTHERS_DIR="$value" ;;
+    esac
+  done < <("$PYTHON_BIN" "$project_root/oneclick_shared.py" defaults)
+}
+
+load_failure_patterns() {
+  local line
+  GROK_FAILURE_PATTERNS=()
+  # oneclick_shared.py failure-patterns
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && GROK_FAILURE_PATTERNS+=("$line")
+  done < <("$PYTHON_BIN" "$project_root/oneclick_shared.py" failure-patterns)
+}
+
 is_solver_ready() {
   "$PYTHON_BIN" - <<'PY' >/dev/null 2>&1
 import socket, sys
@@ -119,7 +146,7 @@ PY
 }
 
 stop_solver() {
-  local timeout_sec=180
+  local timeout_sec="${SOLVER_STOP_TIMEOUT_SEC}"
   local start_epoch
   start_epoch="$(date +%s)"
   log "Stopping solver (timeout ${timeout_sec}s)..."
@@ -153,11 +180,77 @@ stop_solver() {
   return 0
 }
 
+write_diag() {
+  echo "$1" | tee -a "$oneclick_log"
+}
+
+show_grok_failure_summary() {
+  local log_path="$1"
+  local summary_lines=()
+  local pattern match
+
+  if [[ ! -f "$log_path" ]]; then
+    log "Unable to build failure summary: grok log not found."
+    return 0
+  fi
+
+  for pattern in "${GROK_FAILURE_PATTERNS[@]}"; do
+    match="$(grep -F "$pattern" "$log_path" 2>/dev/null | tail -n 1 || true)"
+    if [[ -n "$match" ]]; then
+      summary_lines+=("$match")
+    fi
+  done
+
+  if (( ${#summary_lines[@]} > 0 )); then
+    log "Failure summary from grok log:"
+    printf '%s\n' "${summary_lines[@]}" | awk '!seen[$0]++' | head -n 6 | while IFS= read -r line; do
+      write_diag "[diag] $line"
+    done
+    return 0
+  fi
+
+  log "Failure summary fallback: tail of grok log."
+  tail -n 20 "$log_path" | while IFS= read -r line; do
+    write_diag "[tail] $line"
+  done
+}
+
 PYTHON_BIN="$(find_python)"
 if [[ -z "$PYTHON_BIN" ]]; then
   echo "[-] Python not found. Please install Python 3.10+." >&2
   exit 1
 fi
+
+load_shared_defaults
+load_failure_patterns
+
+DEFAULT_THREADS="${DEFAULT_THREADS:-3}"
+DEFAULT_COUNT="${DEFAULT_COUNT:-5}"
+DEFAULT_SOLVER_THREAD="${DEFAULT_SOLVER_THREAD:-5}"
+DEFAULT_PROXY_HTTP="${DEFAULT_PROXY_HTTP:-http://127.0.0.1:10808}"
+DEFAULT_PROXY_SOCKS="${DEFAULT_PROXY_SOCKS:-socks5://127.0.0.1:10808}"
+SOLVER_READY_TIMEOUT_SEC="${SOLVER_READY_TIMEOUT_SEC:-60}"
+SOLVER_STOP_TIMEOUT_SEC="${SOLVER_STOP_TIMEOUT_SEC:-180}"
+LOG_ROOT_DIR="${LOG_ROOT_DIR:-logs}"
+LOG_SOLVER_DIR="${LOG_SOLVER_DIR:-logs/solver}"
+LOG_GROK_DIR="${LOG_GROK_DIR:-logs/grok}"
+LOG_ONECLICK_DIR="${LOG_ONECLICK_DIR:-logs/oneclick}"
+LOG_OTHERS_DIR="${LOG_OTHERS_DIR:-logs/others}"
+
+if [[ -z "$SOLVER_THREAD" ]]; then
+  SOLVER_THREAD="$DEFAULT_SOLVER_THREAD"
+fi
+if [[ -z "$PROXY_HTTP" ]]; then
+  PROXY_HTTP="$DEFAULT_PROXY_HTTP"
+fi
+if [[ -z "$PROXY_SOCKS" ]]; then
+  PROXY_SOCKS="$DEFAULT_PROXY_SOCKS"
+fi
+
+mkdir -p "$LOG_SOLVER_DIR" "$LOG_GROK_DIR" "$LOG_ONECLICK_DIR" "$LOG_OTHERS_DIR"
+ts="$(date +"%Y%m%d-%H%M%S")"
+oneclick_log="${LOG_ONECLICK_DIR}/start_all.${ts}.log"
+touch "$oneclick_log"
 
 if (( NO_PROXY_MODE == 1 )); then
   log "Proxy disabled by --no-proxy."
@@ -222,8 +315,8 @@ else
     export SOLVER_RESULT_DB_PATH="$SOLVER_RESULT_DB_PATH_ARG"
     log "Apply solver result DB path: ${SOLVER_RESULT_DB_PATH}"
   fi
-  solver_out="logs/solver/solver.oneclick.${ts}.out.log"
-  solver_err="logs/solver/solver.oneclick.${ts}.err.log"
+  solver_out="${LOG_SOLVER_DIR}/solver.oneclick.${ts}.out.log"
+  solver_err="${LOG_SOLVER_DIR}/solver.oneclick.${ts}.err.log"
   solver_args=(api_solver.py --browser_type camoufox --thread "$SOLVER_THREAD" --debug)
   if (( NO_PROXY_MODE == 0 )); then
     solver_args+=(--proxy)
@@ -235,7 +328,7 @@ else
   log "Solver logs: ${solver_out} / ${solver_err}"
 
   ready=0
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$SOLVER_READY_TIMEOUT_SEC"); do
     sleep 1
     if is_solver_ready; then
       ready=1
@@ -243,17 +336,18 @@ else
     fi
   done
   if (( ready == 0 )); then
-    log "Solver not ready within 60 seconds."
+    log "Solver not ready within ${SOLVER_READY_TIMEOUT_SEC} seconds; starting cleanup."
+    stop_solver || true
     exit 1
   fi
   log "Solver is ready."
 fi
 
 if [[ -z "$THREADS" ]]; then
-  THREADS="$(read_positive_int "请输入并发 threads" "3")"
+  THREADS="$(read_positive_int "请输入并发 threads" "$DEFAULT_THREADS")"
 fi
 if [[ -z "$COUNT" ]]; then
-  COUNT="$(read_positive_int "请输入目标 count" "5")"
+  COUNT="$(read_positive_int "请输入目标 count" "$DEFAULT_COUNT")"
 fi
 if ! is_positive_int "$THREADS"; then
   echo "[-] Invalid --threads value: $THREADS" >&2
@@ -263,12 +357,16 @@ if ! is_positive_int "$COUNT"; then
   echo "[-] Invalid --count value: $COUNT" >&2
   exit 1
 fi
+if ! is_positive_int "$SOLVER_THREAD"; then
+  echo "[-] Invalid --solver-thread value: $SOLVER_THREAD" >&2
+  exit 1
+fi
 if [[ -n "$MAX_ATTEMPTS" ]] && ! is_positive_int "$MAX_ATTEMPTS"; then
   echo "[-] Invalid --max-attempts value: $MAX_ATTEMPTS" >&2
   exit 1
 fi
 
-grok_out="logs/grok/grok.oneclick.${ts}.out.log"
+grok_out="${LOG_GROK_DIR}/grok.oneclick.${ts}.out.log"
 grok_args=(-u grok.py --threads "$THREADS" --count "$COUNT")
 if [[ -n "$MAX_ATTEMPTS" ]]; then
   grok_args+=(--max-attempts "$MAX_ATTEMPTS")
@@ -284,4 +382,27 @@ set +e
 exit_code="${PIPESTATUS[0]}"
 set -e
 log "grok.py exited with code ${exit_code}"
+
+attempt_limit_hit=0
+has_success=0
+has_failure_pattern=0
+if [[ -f "$grok_out" ]]; then
+  if grep -Fq "[OK]" "$grok_out" || grep -Fq "注册成功:" "$grok_out"; then
+    has_success=1
+  fi
+  if grep -Fq "ATTEMPT_LIMIT_REACHED" "$grok_out" || grep -Fq "已达到最大尝试上限" "$grok_out"; then
+    attempt_limit_hit=1
+  fi
+  for hint in "${GROK_FAILURE_PATTERNS[@]}"; do
+    if grep -Fq "$hint" "$grok_out"; then
+      has_failure_pattern=1
+      break
+    fi
+  done
+fi
+
+if (( exit_code != 0 || attempt_limit_hit == 1 || (has_success == 0 && has_failure_pattern == 1) )); then
+  show_grok_failure_summary "$grok_out"
+fi
+
 exit "$exit_code"
