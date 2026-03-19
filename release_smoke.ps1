@@ -54,6 +54,19 @@ function Get-OneClickSharedDefaults {
     return $settings
 }
 
+function Get-SharedDefaultValue {
+    param(
+        [hashtable]$Defaults,
+        [string]$Key,
+        [string]$Fallback
+    )
+
+    if ($Defaults.ContainsKey($Key) -and -not [string]::IsNullOrWhiteSpace($Defaults[$Key])) {
+        return $Defaults[$Key]
+    }
+    return $Fallback
+}
+
 function Test-SolverReady {
     try {
         $client = New-Object System.Net.Sockets.TcpClient
@@ -105,10 +118,10 @@ if (-not (Test-Path $pythonPath)) {
 }
 
 $sharedDefaults = Get-OneClickSharedDefaults -PythonPath $pythonPath -ProjectRoot $projectRoot
-$defaultSmokeSolverThread = [int]($sharedDefaults["DEFAULT_SMOKE_SOLVER_THREAD"] ?? "2")
-$defaultProxyHttp = $sharedDefaults["DEFAULT_PROXY_HTTP"]
-$defaultProxySocks = $sharedDefaults["DEFAULT_PROXY_SOCKS"]
-$defaultReadyTimeoutSec = [int]($sharedDefaults["SMOKE_READY_TIMEOUT_SEC"] ?? "90")
+$defaultSmokeSolverThread = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_SMOKE_SOLVER_THREAD" -Fallback "2")
+$defaultProxyHttp = Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_PROXY_HTTP" -Fallback ""
+$defaultProxySocks = Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_PROXY_SOCKS" -Fallback ""
+$defaultReadyTimeoutSec = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "SMOKE_READY_TIMEOUT_SEC" -Fallback "90")
 
 if ($null -eq $SolverThread) {
     $SolverThread = $defaultSmokeSolverThread
@@ -123,9 +136,9 @@ if ([string]::IsNullOrWhiteSpace($ProxySocks)) {
     $ProxySocks = $defaultProxySocks
 }
 
-$logRoot = Join-Path $projectRoot ($sharedDefaults["LOG_ROOT_DIR"] ?? "logs")
-$solverLogDir = Join-Path $projectRoot ($sharedDefaults["LOG_SOLVER_DIR"] ?? "logs/solver")
-$oneclickLogDir = Join-Path $projectRoot ($sharedDefaults["LOG_ONECLICK_DIR"] ?? "logs/oneclick")
+$logRoot = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_ROOT_DIR" -Fallback "logs")
+$solverLogDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_SOLVER_DIR" -Fallback "logs/solver")
+$oneclickLogDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_ONECLICK_DIR" -Fallback "logs/oneclick")
 foreach ($dir in @($logRoot, $solverLogDir, $oneclickLogDir)) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
 }

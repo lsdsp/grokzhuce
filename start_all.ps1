@@ -94,6 +94,19 @@ function Get-GrokFailurePatterns {
     return @(& $PythonPath $helperPath failure-patterns | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 }
 
+function Get-SharedDefaultValue {
+    param(
+        [hashtable]$Defaults,
+        [string]$Key,
+        [string]$Fallback
+    )
+
+    if ($Defaults.ContainsKey($Key) -and -not [string]::IsNullOrWhiteSpace($Defaults[$Key])) {
+        return $Defaults[$Key]
+    }
+    return $Fallback
+}
+
 function Set-SolverStoreEnvironment {
     param(
         [string]$Store,
@@ -275,13 +288,13 @@ if (-not (Test-Path $pythonPath)) {
 $sharedDefaults = Get-OneClickSharedDefaults -PythonPath $pythonPath -ProjectRoot $projectRoot
 $script:grokFailurePatterns = Get-GrokFailurePatterns -PythonPath $pythonPath -ProjectRoot $projectRoot
 
-$defaultThreads = [int]($sharedDefaults["DEFAULT_THREADS"] ?? "3")
-$defaultCount = [int]($sharedDefaults["DEFAULT_COUNT"] ?? "5")
-$defaultSolverThread = [int]($sharedDefaults["DEFAULT_SOLVER_THREAD"] ?? "5")
-$solverReadyTimeoutSec = [int]($sharedDefaults["SOLVER_READY_TIMEOUT_SEC"] ?? "60")
-$solverStopTimeoutSec = [int]($sharedDefaults["SOLVER_STOP_TIMEOUT_SEC"] ?? "180")
-$defaultProxyHttp = $sharedDefaults["DEFAULT_PROXY_HTTP"]
-$defaultProxySocks = $sharedDefaults["DEFAULT_PROXY_SOCKS"]
+$defaultThreads = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_THREADS" -Fallback "3")
+$defaultCount = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_COUNT" -Fallback "5")
+$defaultSolverThread = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_SOLVER_THREAD" -Fallback "5")
+$solverReadyTimeoutSec = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "SOLVER_READY_TIMEOUT_SEC" -Fallback "60")
+$solverStopTimeoutSec = [int](Get-SharedDefaultValue -Defaults $sharedDefaults -Key "SOLVER_STOP_TIMEOUT_SEC" -Fallback "180")
+$defaultProxyHttp = Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_PROXY_HTTP" -Fallback ""
+$defaultProxySocks = Get-SharedDefaultValue -Defaults $sharedDefaults -Key "DEFAULT_PROXY_SOCKS" -Fallback ""
 
 if ($null -eq $SolverThread) {
     $SolverThread = $defaultSolverThread
@@ -293,11 +306,11 @@ if ([string]::IsNullOrWhiteSpace($ProxySocks)) {
     $ProxySocks = $defaultProxySocks
 }
 
-$logRoot = Join-Path $projectRoot ($sharedDefaults["LOG_ROOT_DIR"] ?? "logs")
-$logSolverDir = Join-Path $projectRoot ($sharedDefaults["LOG_SOLVER_DIR"] ?? "logs/solver")
-$logGrokDir = Join-Path $projectRoot ($sharedDefaults["LOG_GROK_DIR"] ?? "logs/grok")
-$logOneClickDir = Join-Path $projectRoot ($sharedDefaults["LOG_ONECLICK_DIR"] ?? "logs/oneclick")
-$logOthersDir = Join-Path $projectRoot ($sharedDefaults["LOG_OTHERS_DIR"] ?? "logs/others")
+$logRoot = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_ROOT_DIR" -Fallback "logs")
+$logSolverDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_SOLVER_DIR" -Fallback "logs/solver")
+$logGrokDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_GROK_DIR" -Fallback "logs/grok")
+$logOneClickDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_ONECLICK_DIR" -Fallback "logs/oneclick")
+$logOthersDir = Join-Path $projectRoot (Get-SharedDefaultValue -Defaults $sharedDefaults -Key "LOG_OTHERS_DIR" -Fallback "logs/others")
 foreach ($dir in @($logRoot, $logSolverDir, $logGrokDir, $logOneClickDir, $logOthersDir)) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
 }

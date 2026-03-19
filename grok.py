@@ -60,6 +60,7 @@ _COMPAT_ATTRS = {
     "config",
     "success_count",
     "attempt_count",
+    "start_time",
     "target_count",
     "max_attempts",
     "stop_event",

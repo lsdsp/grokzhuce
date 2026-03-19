@@ -1,6 +1,7 @@
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import grok
 import grok_compat
@@ -39,17 +40,23 @@ class GrokCompatTests(unittest.TestCase):
         self.assertIs(grok.attempt_limit_reached, grok_compat.state.attempt_limit_reached)
 
     def test_reset_runtime_state_resets_shared_compat_state(self):
+        old_start_time = grok.start_time
         grok.success_count = 2
         grok.attempt_count = 3
         grok.stop_event.set()
         grok.attempt_limit_reached.set()
 
-        grok.reset_runtime_state()
+        with patch("grok_compat.time.time", return_value=old_start_time + 10):
+            grok.reset_runtime_state()
 
         self.assertEqual(grok_compat.state.success_count, 0)
         self.assertEqual(grok_compat.state.attempt_count, 0)
+        self.assertEqual(grok.start_time, old_start_time + 10)
         self.assertFalse(grok_compat.state.stop_event.is_set())
         self.assertFalse(grok_compat.state.attempt_limit_reached.is_set())
+
+    def test_grok_module_exposes_start_time_through_compat_proxy(self):
+        self.assertEqual(grok.start_time, grok_compat.state.start_time)
 
     def test_sync_runner_state_updates_shared_state(self):
         runner = SimpleNamespace(

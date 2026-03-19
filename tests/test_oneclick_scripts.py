@@ -24,6 +24,11 @@ class OneClickScriptIntegrationTests(unittest.TestCase):
         self.assertIn("Show-GrokFailureSummary", ps1)
         self.assertIn("show_grok_failure_summary", sh)
 
+    def test_start_all_ps1_avoids_powershell7_only_null_coalescing_operator(self):
+        ps1 = (PROJECT_ROOT / "start_all.ps1").read_text(encoding="utf-8")
+
+        self.assertNotIn("??", ps1)
+
 
 if __name__ == "__main__":
     unittest.main()
