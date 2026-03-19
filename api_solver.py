@@ -1,11 +1,14 @@
 import argparse
 
 from grok_env import load_project_env
+
+
+load_project_env()
+
 from solver_logging import COLORS, CustomLogger, get_solver_logger
 from solver_server import TurnstileAPIServer
 
 
-load_project_env()
 logger = get_solver_logger()
 
 
