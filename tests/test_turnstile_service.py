@@ -66,6 +66,26 @@ class TurnstileServiceLocalSolverTests(unittest.TestCase):
         self.assertIsNone(token)
         self.assertEqual(get_mock.call_count, 1)
 
+    def test_get_response_logs_local_solver_errors_instead_of_printing(self):
+        with patch.dict("os.environ", {"YESCAPTCHA_KEY": ""}, clear=False):
+            service = TurnstileService(solver_url="http://127.0.0.1:5072")
+
+        errored = Mock()
+        errored.raise_for_status.return_value = None
+        errored.json.return_value = {
+            "errorId": 1,
+            "errorCode": "ERROR_UNKNOWN",
+            "errorDescription": "unexpected",
+        }
+
+        with patch("time.sleep", return_value=None), patch.object(
+            service.local_session, "get", return_value=errored
+        ), patch("g.turnstile_service.LOGGER") as logger_mock:
+            token = service.get_response("task-123", max_retries=1, initial_delay=0, retry_delay=0)
+
+        self.assertIsNone(token)
+        logger_mock.warning.assert_called_once()
+
 
 class TurnstileServiceYesCaptchaTests(unittest.TestCase):
     def test_create_task_with_yescaptcha_uses_timeout(self):
@@ -96,6 +116,22 @@ class TurnstileServiceYesCaptchaTests(unittest.TestCase):
 
         self.assertEqual(token, "token-yes")
         self.assertEqual(post_mock.call_args.kwargs["timeout"], service.YESCAPTCHA_TIMEOUT)
+
+    def test_get_response_logs_yescaptcha_errors_instead_of_printing(self):
+        with patch.dict("os.environ", {"YESCAPTCHA_KEY": "yes-test-key"}, clear=False):
+            service = TurnstileService()
+
+        failed = Mock()
+        failed.raise_for_status.return_value = None
+        failed.json.return_value = {"errorId": 1, "errorDescription": "bad task"}
+
+        with patch("time.sleep", return_value=None), patch(
+            "g.turnstile_service.requests.post", return_value=failed
+        ), patch("g.turnstile_service.LOGGER") as logger_mock:
+            token = service.get_response("task-yes-1", max_retries=1, initial_delay=0, retry_delay=0)
+
+        self.assertIsNone(token)
+        logger_mock.warning.assert_called_once()
 
 
 if __name__ == "__main__":

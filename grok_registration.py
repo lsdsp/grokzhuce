@@ -1,6 +1,6 @@
 import concurrent.futures
 import os
-import re
+import random
 import threading
 import time
 from dataclasses import dataclass
@@ -13,9 +13,7 @@ from g import EmailService, NsfwSettingsService, TurnstileService, UserAgreement
 from grok_config import DEFAULT_SITE_URL, build_default_runtime_context, should_delete_email_after_registration
 from grok_protocol import (
     MAX_EMAIL_CODE_CYCLES_PER_EMAIL,
-    SIGNUP_RETRY_PER_CODE,
     compact_text,
-    generate_random_name,
     generate_random_string,
     get_random_chrome_profile,
     mask_email,
@@ -23,6 +21,7 @@ from grok_protocol import (
     scan_signup_bootstrap,
     verify_email_code_grpc,
 )
+from grok_protocol_signup import attempt_signup
 from grok_runtime import AppConfig, ErrorType, JsonlLogger, LOGGER, RuntimeContext, StageResult, StopPolicy, StopReason
 
 
@@ -150,52 +149,18 @@ class GrokRunner:
         return StageResult(True, "verify_code", data={"code": code})
 
     def _attempt_signup(self, session, services: ServiceBundle, email: str, password: str, code: str, impersonate: str, user_agent: str) -> StageResult:
-        for _ in range(SIGNUP_RETRY_PER_CODE):
-            task_id = services.turnstile_service.create_task(self.site_url, self.runtime.site_key)
-            token = services.turnstile_service.get_response(task_id)
-            if not token or token == "CAPTCHA_FAIL":
-                continue
-            headers = {
-                "user-agent": user_agent,
-                "accept": "text/x-component",
-                "content-type": "text/plain;charset=UTF-8",
-                "origin": self.site_url,
-                "referer": f"{self.site_url}/sign-up",
-                "cookie": f"__cf_bm={session.cookies.get('__cf_bm', '')}",
-                "next-router-state-tree": self.runtime.state_tree,
-                "next-action": self.runtime.action_id,
-            }
-            payload = [{
-                "emailValidationCode": code,
-                "createUserAndSessionRequest": {
-                    "email": email,
-                    "givenName": generate_random_name(),
-                    "familyName": generate_random_name(),
-                    "clearTextPassword": password,
-                    "tosAcceptedVersion": "$undefined",
-                },
-                "turnstileToken": token,
-                "promptOnDuplicateEmail": True,
-            }]
-            with self.post_lock:
-                response = session.post(f"{self.site_url}/sign-up", json=payload, headers=headers, timeout=45)
-            body = (response.text or "").lower()
-            if "invalid-validation-code" in body or "email validation code is invalid" in body:
-                return StageResult(False, "signup", ErrorType.SIGNUP, True, "验证码失效", data={"code_invalid": True})
-            if response.status_code != 200:
-                time.sleep(3)
-                continue
-            match = re.search(r'(https://[^" \s]+set-cookie\?q=[^:" \s]+)1:', response.text)
-            if not match:
-                break
-            back = session.get(match.group(1), allow_redirects=True, timeout=30)
-            _ = back.status_code
-            sso = session.cookies.get("sso") or ""
-            sso_rw = session.cookies.get("sso-rw") or ""
-            if not sso:
-                break
-            return StageResult(True, "signup", data={"sso": sso, "sso_rw": sso_rw, "impersonate": impersonate, "user_agent": user_agent})
-        return StageResult(False, "signup", ErrorType.SIGNUP, True, "注册重试耗尽")
+        return attempt_signup(
+            session=session,
+            turnstile_service=services.turnstile_service,
+            runtime=self.runtime,
+            site_url=self.site_url,
+            email=email,
+            password=password,
+            code=code,
+            impersonate=impersonate,
+            user_agent=user_agent,
+            post_lock=self.post_lock,
+        )
 
     def _run_post_signup_actions(self, services: ServiceBundle, signup_result: StageResult) -> StageResult:
         data = signup_result.data
@@ -225,6 +190,7 @@ class GrokRunner:
             )
 
         nsfw_tag = "OFF"
+        nsfw_detail = ""
         if self.cfg.enable_nsfw:
             birth = services.nsfw_service.set_birth_date(
                 sso=sso,
@@ -271,23 +237,48 @@ class GrokRunner:
                 impersonate=impersonate,
                 user_agent=user_agent,
             )
+            detail_parts = []
+            if unhinged.get("grpc_status") not in (None, ""):
+                detail_parts.append(f"grpc={unhinged.get('grpc_status')}")
+            if unhinged.get("endpoint"):
+                detail_parts.append(f"endpoint={unhinged.get('endpoint')}")
+            if unhinged.get("feature_key"):
+                detail_parts.append(f"feature={unhinged.get('feature_key')}")
+            if unhinged.get("error"):
+                detail_parts.append(f"error={unhinged.get('error')}")
+            attempt_summaries = []
+            for attempt in unhinged.get("attempts", []):
+                feature = attempt.get("feature_key") or "unknown"
+                grpc_status = attempt.get("grpc_status")
+                status_code = attempt.get("status_code")
+                if grpc_status not in (None, ""):
+                    suffix = f"grpc{grpc_status}"
+                elif status_code not in (None, ""):
+                    suffix = f"http{status_code}"
+                else:
+                    suffix = "unknown"
+                attempt_summaries.append(f"{feature}@{suffix}")
+            if attempt_summaries:
+                detail_parts.append(f"tried={','.join(attempt_summaries)}")
+            nsfw_detail = " | ".join(detail_parts)
             nsfw_tag = "OK"
             if not unhinged.get("supported", True):
                 nsfw_tag = "SKIP"
             elif not unhinged.get("ok", False):
                 nsfw_tag = "WARN"
-        return StageResult(True, "post_signup_actions", data={"nsfw_tag": nsfw_tag, "sso": sso})
+        return StageResult(True, "post_signup_actions", data={"nsfw_tag": nsfw_tag, "nsfw_detail": nsfw_detail, "sso": sso})
 
-    def _record_success(self, sso: str, email: str, thread_id: int, attempt_no: int, nsfw_tag: str):
+    def _record_success(self, sso: str, email: str, thread_id: int, attempt_no: int, nsfw_tag: str, nsfw_detail: str = ""):
         with self.write_lock:
             with open(self.cfg.output_file, "a", encoding="utf-8") as handle:
                 handle.write(sso + "\n")
             done = self.stop.mark_success()
             avg = (time.time() - self.start_ts) / max(1, done)
+        detail_suffix = f" | {nsfw_detail}" if nsfw_detail else ""
         self._log(
             "info",
             "record_success",
-            f"[T{thread_id}] 注册成功: {done}/{self.stop.target_count} | {mask_email(email)} | 平均: {avg:.1f}s | NSFW: {nsfw_tag}",
+            f"[T{thread_id}] 注册成功: {done}/{self.stop.target_count} | {mask_email(email)} | 平均: {avg:.1f}s | NSFW: {nsfw_tag}{detail_suffix}",
             thread_id=thread_id,
             attempt_no=attempt_no,
             email=mask_email(email),
@@ -330,7 +321,14 @@ class GrokRunner:
                 self._fail(post_result, thread_id, attempt_no, email)
                 break
 
-            self._record_success(post_result.data["sso"], email, thread_id, attempt_no, post_result.data["nsfw_tag"])
+            self._record_success(
+                post_result.data["sso"],
+                email,
+                thread_id,
+                attempt_no,
+                post_result.data["nsfw_tag"],
+                post_result.data.get("nsfw_detail", ""),
+            )
             return True
         return False
 
@@ -434,4 +432,4 @@ class GrokRunner:
             self._log("info", "summary", f"failure_bucket {key}={value}")
         if self.stop.stop_reason == StopReason.ATTEMPT_LIMIT and self.stop.success_count < self.stop.target_count:
             self._log("warning", "summary", "已达到最大尝试上限，提前停止。 [ATTEMPT_LIMIT_REACHED]", error_type=ErrorType.POLICY.value)
-        return 0
+        return 0 if self.stop.success_count >= self.stop.target_count else 1

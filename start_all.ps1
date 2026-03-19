@@ -3,6 +3,8 @@
     [Nullable[int]]$Count = $null,
     [Nullable[int]]$MaxAttempts = $null,
     [int]$SolverThread = 5,
+    [string]$SolverResultStore = "",
+    [string]$SolverResultDbPath = "",
     [string]$ProxyHttp = "http://127.0.0.1:10808",
     [string]$ProxySocks = "socks5://127.0.0.1:10808",
     [switch]$NoProxy
@@ -58,6 +60,46 @@ function Clear-ProxyEnvironment {
     foreach ($name in @("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY")) {
         if (Test-Path "Env:$name") {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Set-SolverStoreEnvironment {
+    param(
+        [string]$Store,
+        [string]$DbPath
+    )
+
+    $script:solverStoreEnvBackup = @{
+        SOLVER_RESULT_STORE = [Environment]::GetEnvironmentVariable("SOLVER_RESULT_STORE", "Process")
+        SOLVER_RESULT_DB_PATH = [Environment]::GetEnvironmentVariable("SOLVER_RESULT_DB_PATH", "Process")
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Store)) {
+        $normalizedStore = $Store.Trim().ToLowerInvariant()
+        if ($normalizedStore -notin @("memory", "sqlite")) {
+            throw "Invalid -SolverResultStore value: $Store. Allowed values: memory, sqlite."
+        }
+        $env:SOLVER_RESULT_STORE = $normalizedStore
+        Write-Step "Apply solver result store: $normalizedStore"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($DbPath)) {
+        $env:SOLVER_RESULT_DB_PATH = $DbPath.Trim()
+        Write-Step "Apply solver result DB path: $($env:SOLVER_RESULT_DB_PATH)"
+    }
+}
+
+function Restore-SolverStoreEnvironment {
+    if (-not $script:solverStoreEnvBackup) {
+        return
+    }
+
+    foreach ($entry in $script:solverStoreEnvBackup.GetEnumerator()) {
+        if ([string]::IsNullOrEmpty($entry.Value)) {
+            Remove-Item "Env:$($entry.Key)" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item "Env:$($entry.Key)" -Value $entry.Value
         }
     }
 }
@@ -238,6 +280,7 @@ if ($NoProxy) {
 if (Test-SolverReady) {
     Write-Step "Solver is already running at http://127.0.0.1:5072"
 } else {
+    Set-SolverStoreEnvironment -Store $SolverResultStore -DbPath $SolverResultDbPath
     $solverOut = Join-Path $logSolverDir "solver.oneclick.$runTimestamp.out.log"
     $solverErr = Join-Path $logSolverDir "solver.oneclick.$runTimestamp.err.log"
 
@@ -355,6 +398,7 @@ try {
     }
 } finally {
     $stopped = Stop-SolverWithTimeout -TimeoutSec 180
+    Restore-SolverStoreEnvironment
     if (-not $stopped -and $exitCode -eq 0) {
         $exitCode = 1
     }

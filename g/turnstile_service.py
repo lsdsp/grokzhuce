@@ -3,17 +3,19 @@ Turnstile验证服务类
 """
 import os
 import time
-from pathlib import Path
 import requests
 from urllib.parse import urlencode
-from dotenv import load_dotenv
 
-load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
+from grok_runtime import LOGGER
 
 
 class TurnstileService:
     """Turnstile验证服务类"""
     YESCAPTCHA_TIMEOUT = 30
+
+    @staticmethod
+    def _warn(message: str):
+        LOGGER.warning(message)
 
     def __init__(self, solver_url="http://127.0.0.1:5072"):
         """
@@ -75,7 +77,7 @@ class TurnstileService:
                     data = response.json()
 
                     if data.get('errorId') != 0:
-                        print(f"YesCaptcha获取结果失败: {data.get('errorDescription')}")
+                        self._warn(f"YesCaptcha获取结果失败: {data.get('errorDescription')}")
                         return None
 
                     if data.get('status') == 'ready':
@@ -83,12 +85,12 @@ class TurnstileService:
                         if token:
                             return token
                         else:
-                            print("YesCaptcha返回结果中没有token")
+                            self._warn("YesCaptcha返回结果中没有token")
                             return None
                     elif data.get('status') == 'processing':
                         time.sleep(retry_delay)
                     else:
-                        print(f"YesCaptcha未知状态: {data.get('status')}")
+                        self._warn(f"YesCaptcha未知状态: {data.get('status')}")
                         time.sleep(retry_delay)
                 else:
                     # 使用本地 Turnstile Solver
@@ -117,17 +119,17 @@ class TurnstileService:
                         return captcha if captcha != "CAPTCHA_FAIL" else None
 
                     if data.get('errorId') == 1:
-                        print(f"本地solver返回错误: {data.get('errorCode')} - {data.get('errorDescription')}")
+                        self._warn(f"本地solver返回错误: {data.get('errorCode')} - {data.get('errorDescription')}")
                         return None
 
                     # 其他未知响应继续轮询，避免短暂中间态造成误判。
                     if status and status != 'processing':
-                        print(f"本地solver未知状态: {status}")
+                        self._warn(f"本地solver未知状态: {status}")
                         time.sleep(retry_delay)
                     else:
                         time.sleep(retry_delay)
             except Exception as e:
-                print(f"获取Turnstile响应异常: {e}")
+                self._warn(f"获取Turnstile响应异常: {e}")
                 time.sleep(retry_delay)
 
         return None

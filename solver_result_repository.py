@@ -1,12 +1,15 @@
-from db_results import cleanup_old_results, init_db, load_result, save_result
+from db_results import default_result_store
 
 
 class SolverResultRepository:
+    def __init__(self, store=None):
+        self.store = store or default_result_store
+
     async def init(self):
-        await init_db()
+        await self.store.init()
 
     async def save_pending(self, task_id: str, *, url: str, sitekey: str, action=None, cdata=None):
-        await save_result(
+        await self.store.save(
             task_id,
             "turnstile",
             {
@@ -19,16 +22,16 @@ class SolverResultRepository:
         )
 
     async def save_token(self, task_id: str, token: str, elapsed_time: float):
-        await save_result(task_id, "turnstile", {"value": token, "elapsed_time": elapsed_time})
+        await self.store.save(task_id, "turnstile", {"value": token, "elapsed_time": elapsed_time})
 
     async def save_failure(self, task_id: str, elapsed_time: float):
-        await save_result(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time})
+        await self.store.save(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time})
 
     async def load(self, task_id: str):
-        return await load_result(task_id)
+        return await self.store.load(task_id)
 
     async def cleanup(self, days_old: int = 7):
-        return await cleanup_old_results(days_old=days_old)
+        return await self.store.cleanup(days_old=days_old)
 
     def build_result_payload(self, result):
         if not result:

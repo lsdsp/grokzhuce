@@ -31,7 +31,7 @@ class NsfwServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["x-user-agent"], "connect-es/2.1.1")
         self.assertEqual(kwargs["headers"]["x-grpc-web"], "1")
         self.assertIn("sso=sso-token", kwargs["headers"]["cookie"])
-        self.assertIn("sso-rw=sso-token", kwargs["headers"]["cookie"])
+        self.assertIn("sso-rw=sso-rw-token", kwargs["headers"]["cookie"])
         self.assertEqual(
             result["endpoint"],
             "https://grok.com/auth_mgmt.AuthManagement/UpdateUserFeatureControls",
@@ -61,7 +61,7 @@ class NsfwServiceTests(unittest.TestCase):
         kwargs = post_mock.call_args.kwargs
         self.assertEqual(kwargs["headers"]["origin"], "https://grok.com")
         self.assertIn("sso=sso-token", kwargs["headers"]["cookie"])
-        self.assertIn("sso-rw=sso-token", kwargs["headers"]["cookie"])
+        self.assertIn("sso-rw=sso-rw-token", kwargs["headers"]["cookie"])
         self.assertTrue(result["supported"])
         self.assertEqual(
             result["endpoint"],
@@ -118,7 +118,7 @@ class NsfwServiceTests(unittest.TestCase):
         kwargs = post_mock.call_args.kwargs
         self.assertEqual(kwargs["headers"]["origin"], "https://grok.com")
         self.assertIn("sso=sso-token", kwargs["headers"]["cookie"])
-        self.assertIn("sso-rw=sso-token", kwargs["headers"]["cookie"])
+        self.assertIn("sso-rw=sso-rw-token", kwargs["headers"]["cookie"])
         self.assertIn("birthDate", kwargs["json"])
         self.assertEqual(result["endpoint"], "https://grok.com/rest/auth/set-birth-date")
 
@@ -162,6 +162,13 @@ class NsfwServiceTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertFalse(result["supported"])
         self.assertEqual(result["grpc_status"], "13")
+        self.assertGreaterEqual(len(result["attempts"]), 1)
+        self.assertEqual(result["attempts"][0]["feature_key"], "always_enable_unhinged_mode")
+        self.assertEqual(result["attempts"][0]["grpc_status"], "13")
+        self.assertEqual(
+            result["attempts"][0]["endpoint"],
+            "https://grok.com/auth_mgmt.AuthManagement/UpdateUserFeatureControls",
+        )
 
 
 if __name__ == "__main__":

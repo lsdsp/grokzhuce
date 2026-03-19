@@ -1,4 +1,6 @@
 import unittest
+from importlib import reload
+from unittest.mock import patch
 
 from db_results import cleanup_old_results, load_result, results_db, save_result
 
@@ -27,6 +29,23 @@ class DbResultsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deleted, 1)
         self.assertIsNone(await load_result("old"))
         self.assertIsNotNone(await load_result("new"))
+
+    async def test_db_results_can_select_sqlite_default_store(self):
+        import db_results
+
+        with patch.dict(
+            "os.environ",
+            {
+                "SOLVER_RESULT_STORE": "sqlite",
+                "SOLVER_RESULT_DB_PATH": ":memory:",
+            },
+            clear=False,
+        ):
+            reloaded = reload(db_results)
+
+        self.assertEqual(reloaded.default_result_store.__class__.__name__, "SQLiteSolverResultStore")
+        with patch.dict("os.environ", {"SOLVER_RESULT_STORE": "memory"}, clear=False):
+            reload(db_results)
 
 
 if __name__ == "__main__":

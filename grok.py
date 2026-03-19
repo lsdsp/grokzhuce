@@ -3,6 +3,10 @@ import os
 import threading
 import time
 
+from grok_env import load_project_env
+
+load_project_env()
+
 from grok_config import (
     DEFAULT_SITE_KEY,
     DEFAULT_SITE_URL,
@@ -17,34 +21,39 @@ from grok_config import (
     should_delete_email_after_registration,
 )
 from grok_protocol import (
-    CHROME_PROFILES,
-    EMAIL_CODE_POLL_ATTEMPTS_PER_ROUND,
-    EMAIL_CODE_REQUEST_ROUNDS,
-    MAX_EMAIL_CODE_CYCLES_PER_EMAIL,
-    SIGNUP_RETRY_PER_CODE,
-    compact_text,
-    encode_grpc_message,
-    encode_grpc_message_verify,
-    generate_random_name,
-    generate_random_string,
-    get_random_chrome_profile,
-    mask_email,
     request_and_wait_for_email_code as _request_and_wait_for_email_code,
     send_email_code_grpc as _send_email_code_grpc,
     verify_email_code_grpc as _verify_email_code_grpc,
 )
 from grok_registration import GrokRunner
 from grok_runtime import (
-    LOGGER,
-    AppConfig,
-    AttemptClaim,
-    ErrorType,
     JsonlLogger,
-    RuntimeContext,
-    StageResult,
     StopPolicy,
     StopReason,
 )
+
+__all__ = [
+    "JsonlLogger",
+    "StopPolicy",
+    "StopReason",
+    "attempt_count",
+    "attempt_limit_reached",
+    "compute_effective_max_attempts",
+    "config",
+    "main",
+    "max_attempts",
+    "output_file",
+    "read_bool_env",
+    "request_and_wait_for_email_code",
+    "reset_runtime_state",
+    "send_email_code_grpc",
+    "should_delete_email_after_registration",
+    "site_url",
+    "stop_event",
+    "success_count",
+    "target_count",
+    "verify_email_code_grpc",
+]
 
 
 site_url = DEFAULT_SITE_URL
@@ -55,9 +64,6 @@ config = {
 }
 
 # compatibility globals; runtime logic now lives in StopPolicy/GrokRunner
-post_lock = threading.Lock()
-file_lock = threading.Lock()
-attempt_lock = threading.Lock()
 success_count = 0
 attempt_count = 0
 start_time = time.time()
@@ -101,6 +107,24 @@ def _read_int_with_default(prompt: str, default_value: int) -> int:
         return default_value
 
 
+def _sync_runner_compat_state(runner):
+    global success_count, attempt_count
+
+    config.update(
+        {
+            "site_key": runner.runtime.site_key,
+            "state_tree": runner.runtime.state_tree,
+            "action_id": runner.runtime.action_id,
+        }
+    )
+
+    success_count = runner.stop.success_count
+    attempt_count = runner.stop.attempt_count
+    if runner.stop.stop_reason == StopReason.ATTEMPT_LIMIT:
+        attempt_limit_reached.set()
+        stop_event.set()
+
+
 def main(thread_count=None, total_count=None, max_attempts_arg=None, metrics_file=None):
     print("=" * 60 + "\nGrok 注册机\n" + "=" * 60)
     threads = int(thread_count) if thread_count is not None else _read_int_with_default("\n并发数 (默认8): ", 8)
@@ -135,20 +159,7 @@ def main(thread_count=None, total_count=None, max_attempts_arg=None, metrics_fil
     runtime = build_default_runtime_context()
     runner = GrokRunner(cfg, runtime=runtime, site_url=site_url)
     code = runner.run()
-
-    config.update(
-        {
-            "site_key": runner.runtime.site_key,
-            "state_tree": runner.runtime.state_tree,
-            "action_id": runner.runtime.action_id,
-        }
-    )
-
-    success_count = runner.stop.success_count
-    attempt_count = runner.stop.attempt_count
-    if runner.stop.stop_reason == StopReason.ATTEMPT_LIMIT:
-        attempt_limit_reached.set()
-        stop_event.set()
+    _sync_runner_compat_state(runner)
     return code
 
 

@@ -47,6 +47,36 @@ function Test-SolverReady {
     }
 }
 
+function Set-SolverStoreEnvironment {
+    param(
+        [string]$StoreKind,
+        [string]$DbPath
+    )
+
+    $script:previousSolverStore = [ordered]@{
+        SOLVER_RESULT_STORE = $env:SOLVER_RESULT_STORE
+        SOLVER_RESULT_DB_PATH = $env:SOLVER_RESULT_DB_PATH
+    }
+
+    $env:SOLVER_RESULT_STORE = $StoreKind
+    $env:SOLVER_RESULT_DB_PATH = $DbPath
+}
+
+function Restore-SolverStoreEnvironment {
+    if (-not $script:previousSolverStore) {
+        return
+    }
+
+    foreach ($name in @("SOLVER_RESULT_STORE", "SOLVER_RESULT_DB_PATH")) {
+        $value = $script:previousSolverStore[$name]
+        if ($null -eq $value) {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+        } else {
+            Set-Item "Env:$name" -Value $value
+        }
+    }
+}
+
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
@@ -77,6 +107,8 @@ if ($NoProxy) {
 $startedSolver = $false
 $solverProcess = $null
 $solverErr = $null
+$solverDbPath = $null
+$script:previousSolverStore = $null
 
 try {
     Write-Step "Running unit tests"
@@ -91,6 +123,9 @@ try {
     } else {
         $solverOut = Join-Path $solverLogDir "solver.smoke.$ts.out.log"
         $solverErr = Join-Path $solverLogDir "solver.smoke.$ts.err.log"
+        $solverDbPath = Join-Path $solverLogDir "solver.smoke.$ts.sqlite3"
+        Write-Step "Using SQLite solver store for smoke: $solverDbPath"
+        Set-SolverStoreEnvironment -StoreKind "sqlite" -DbPath $solverDbPath
         $solverArgs = @("api_solver.py", "--browser_type", "camoufox", "--thread", "$SolverThread", "--debug")
         if (-not $NoProxy) {
             $solverArgs += "--proxy"
@@ -138,12 +173,27 @@ try {
         throw "Unexpected /turnstile response: $($r2 | ConvertTo-Json -Compress)"
     }
 
+    if ($startedSolver -and $solverDbPath) {
+        Write-Step "Checking SQLite solver store health"
+        if (-not (Test-Path $solverDbPath)) {
+            throw "SQLite solver DB was not created: $solverDbPath"
+        }
+
+        $tableCheck = & $pythonPath -c "import sqlite3, sys; conn = sqlite3.connect(sys.argv[1]); row = conn.execute(""SELECT name FROM sqlite_master WHERE type='table' AND name='solver_results'"").fetchone(); conn.close(); raise SystemExit(0 if row else 1)" $solverDbPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "SQLite solver DB is missing table solver_results: $solverDbPath"
+        }
+    } else {
+        Write-Step "Skipping SQLite solver store check because an existing solver instance is already running"
+    }
+
     Write-Step "Release smoke passed"
     exit 0
 } catch {
     Write-Step "Release smoke failed: $($_.Exception.Message)"
     exit 1
 } finally {
+    Restore-SolverStoreEnvironment
     if ($startedSolver -and $solverProcess) {
         try {
             Stop-Process -Id $solverProcess.Id -Force -ErrorAction SilentlyContinue

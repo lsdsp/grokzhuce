@@ -6,15 +6,11 @@ import random
 import threading
 import time
 import uuid
-from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 from urllib.parse import urlparse
 
 from curl_cffi import requests
-from dotenv import load_dotenv
 from .proxy_utils import build_requests_proxies
-
-load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -222,7 +218,7 @@ class NsfwSettingsService:
                 if clearance:
                     request_cookies["cf_clearance"] = clearance
                 if "grok.com" in url:
-                    headers["cookie"] = self._build_cookie_header(sso=sso, sso_rw=sso, cf_clearance=clearance)
+                    headers["cookie"] = self._build_cookie_header(sso=sso, sso_rw=(sso_rw or sso), cf_clearance=clearance)
                     request_cookies = None
 
                 response = self._post_with_retries(
@@ -327,7 +323,7 @@ class NsfwSettingsService:
                 if "grok.com" in url:
                     headers["cookie"] = self._build_cookie_header(
                         sso=sso,
-                        sso_rw=sso,
+                        sso_rw=(sso_rw or sso),
                         cf_clearance=clearance,
                     )
                     request_cookies = None
@@ -408,6 +404,7 @@ class NsfwSettingsService:
                 "status_code": 200,
                 "grpc_status": "unsupported",
                 "error": None,
+                "attempts": [],
             }
 
         feature_candidates = []
@@ -431,6 +428,7 @@ class NsfwSettingsService:
             last_grpc_status = None
             last_error = None
             last_endpoint = None
+            attempts = []
 
             endpoints = [
                 ("https://grok.com/auth_mgmt.AuthManagement/UpdateUserFeatureControls", "https://grok.com", "https://grok.com/?_s=data"),
@@ -450,7 +448,7 @@ class NsfwSettingsService:
                     if "grok.com" in url:
                         headers["cookie"] = self._build_cookie_header(
                             sso=sso,
-                            sso_rw=sso,
+                            sso_rw=(sso_rw or sso),
                             cf_clearance=clearance,
                         )
                         request_cookies = None
@@ -466,6 +464,22 @@ class NsfwSettingsService:
                     last_status_code = response.status_code
                     last_grpc_status = grpc_status
                     last_endpoint = url
+                    attempt_error = None
+                    if response.status_code == 403:
+                        attempt_error = "HTTP 403"
+                    elif response.status_code != 200:
+                        attempt_error = f"HTTP {response.status_code}"
+                    elif grpc_status not in (None, "0"):
+                        attempt_error = f"gRPC {grpc_status}"
+                    attempts.append(
+                        {
+                            "feature_key": feature_key,
+                            "status_code": response.status_code,
+                            "grpc_status": grpc_status,
+                            "endpoint": url,
+                            "error": attempt_error,
+                        }
+                    )
 
                     if response.status_code == 200 and grpc_status in (None, "0"):
                         self._unhinged_checked = True
@@ -478,6 +492,7 @@ class NsfwSettingsService:
                             "error": None,
                             "feature_key": feature_key,
                             "endpoint": url,
+                            "attempts": attempts,
                         }
 
                     if response.status_code == 200 and grpc_status in ("3", "13", "12"):
@@ -502,6 +517,8 @@ class NsfwSettingsService:
                         "grpc_status": grpc_status,
                         "error": last_error,
                         "endpoint": url,
+                        "feature_key": feature_key,
+                        "attempts": attempts,
                     }
 
             # 所有候选都不被支持，优雅降级（不再告警）。
@@ -514,6 +531,7 @@ class NsfwSettingsService:
                 "grpc_status": last_grpc_status or "unsupported",
                 "error": None,
                 "endpoint": last_endpoint,
+                "attempts": attempts,
             }
         except Exception as e:
             return {
@@ -522,4 +540,5 @@ class NsfwSettingsService:
                 "status_code": None,
                 "grpc_status": None,
                 "error": str(e),
+                "attempts": [],
             }
