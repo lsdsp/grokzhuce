@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from curl_cffi import requests
 
 from g import EmailService, NsfwSettingsService, TurnstileService, UserAgreementService
+from grok_crypto import encrypt_sso_value
 from grok_config import DEFAULT_SITE_URL, build_default_runtime_context, should_delete_email_after_registration
 from grok_protocol import (
     MAX_EMAIL_CODE_CYCLES_PER_EMAIL,
@@ -48,7 +49,10 @@ class GrokRunner:
         self.metrics = JsonlLogger(cfg.metrics_path)
         self.post_lock = threading.Lock()
         self.write_lock = threading.Lock()
+        self.stats_lock = threading.Lock()
         self.error_counts: Dict[str, int] = {}
+        self.stage_failures: Dict[str, int] = {}
+        self.stage_failure_stop_stage = ""
         self.start_ts = time.time()
         Path(cfg.output_file).parent.mkdir(parents=True, exist_ok=True)
         Path(cfg.output_file).touch(exist_ok=True)
@@ -56,6 +60,26 @@ class GrokRunner:
             os.chmod(cfg.output_file, 0o600)
         except Exception:
             pass
+        if getattr(cfg, "sso_output_mode", "plain") == "encrypted" and not getattr(cfg, "sso_encryption_passphrase", ""):
+            raise ValueError("SSO_ENCRYPTION_PASSPHRASE is required when SSO_OUTPUT_MODE=encrypted")
+
+    @staticmethod
+    def _mask_sso_value(value: str) -> str:
+        if not value:
+            return ""
+        if len(value) <= 8:
+            return value[:2] + ("*" * max(1, len(value) - 4)) + value[-2:]
+        return value[:4] + ("*" * max(4, len(value) - 8)) + value[-4:]
+
+    def _render_sso_output(self, sso: str) -> str:
+        mode = getattr(self.cfg, "sso_output_mode", "plain")
+        if mode == "disabled":
+            return ""
+        if mode == "masked":
+            return self._mask_sso_value(sso)
+        if mode == "encrypted":
+            return encrypt_sso_value(sso, getattr(self.cfg, "sso_encryption_passphrase", ""))
+        return sso
 
     def _log(self, level: str, stage: str, message: str, **fields: Any):
         fields = {key: value for key, value in fields.items() if value not in (None, "")}
@@ -63,7 +87,11 @@ class GrokRunner:
         getattr(LOGGER, level.lower() if hasattr(LOGGER, level.lower()) else "info")(message)
 
     def _fail(self, result: StageResult, thread_id: int, attempt_no: int, email: str = ""):
-        self.error_counts[result.error_type.value] = self.error_counts.get(result.error_type.value, 0) + 1
+        threshold = max(1, int(getattr(self.cfg, "stage_failure_threshold", 20)))
+        with self.stats_lock:
+            self.error_counts[result.error_type.value] = self.error_counts.get(result.error_type.value, 0) + 1
+            stage_failures = self.stage_failures.get(result.stage, 0) + 1
+            self.stage_failures[result.stage] = stage_failures
         self._log(
             "warning" if result.retryable else "error",
             result.stage,
@@ -74,6 +102,27 @@ class GrokRunner:
             error_type=result.error_type.value,
             details=compact_text(result.details),
         )
+        if stage_failures >= threshold and not self.stop.should_stop():
+            self.stage_failure_stop_stage = result.stage
+            self.stop.stop(StopReason.STAGE_FAILURE)
+            self._log(
+                "error",
+                "policy",
+                f"{result.stage} 连续失败达到阈值，提前停止。",
+                thread_id=thread_id,
+                attempt_no=attempt_no,
+                email=mask_email(email),
+                error_type=ErrorType.POLICY.value,
+                failed_stage=result.stage,
+                stage_failure_count=stage_failures,
+                stage_failure_threshold=threshold,
+            )
+
+    def _mark_stage_success(self, stage: str):
+        if not stage:
+            return
+        with self.stats_lock:
+            self.stage_failures.pop(stage, None)
 
     def _stage_emit(self, stage: str, thread_id: int, attempt_no: int, email: str = ""):
         masked = mask_email(email)
@@ -269,9 +318,11 @@ class GrokRunner:
         return StageResult(True, "post_signup_actions", data={"nsfw_tag": nsfw_tag, "nsfw_detail": nsfw_detail, "sso": sso})
 
     def _record_success(self, sso: str, email: str, thread_id: int, attempt_no: int, nsfw_tag: str, nsfw_detail: str = ""):
+        rendered_sso = self._render_sso_output(sso)
         with self.write_lock:
-            with open(self.cfg.output_file, "a", encoding="utf-8") as handle:
-                handle.write(sso + "\n")
+            if rendered_sso:
+                with open(self.cfg.output_file, "a", encoding="utf-8") as handle:
+                    handle.write(rendered_sso + "\n")
             done = self.stop.mark_success()
             avg = (time.time() - self.start_ts) / max(1, done)
         detail_suffix = f" | {nsfw_detail}" if nsfw_detail else ""
@@ -282,6 +333,7 @@ class GrokRunner:
             thread_id=thread_id,
             attempt_no=attempt_no,
             email=mask_email(email),
+            sso_output_mode=getattr(self.cfg, "sso_output_mode", "plain"),
         )
 
     def _complete_registration_attempt(self, session, services: ServiceBundle, email: str, password: str, impersonate: str, user_agent: str, thread_id: int, attempt_no: int) -> bool:
@@ -291,6 +343,7 @@ class GrokRunner:
             if not request_result.ok:
                 self._fail(request_result, thread_id, attempt_no, email)
                 break
+            self._mark_stage_success(request_result.stage)
             code = request_result.data["code"]
 
             verify_result = self._verify_code(session, email, code, thread_id, attempt_no)
@@ -298,6 +351,7 @@ class GrokRunner:
                 used_codes.add(code)
                 self._fail(verify_result, thread_id, attempt_no, email)
                 continue
+            self._mark_stage_success(verify_result.stage)
 
             signup_result = self._attempt_signup(session, services, email, password, code, impersonate, user_agent)
             if not signup_result.ok and signup_result.data.get("code_invalid"):
@@ -315,11 +369,13 @@ class GrokRunner:
             if not signup_result.ok:
                 self._fail(signup_result, thread_id, attempt_no, email)
                 break
+            self._mark_stage_success(signup_result.stage)
 
             post_result = self._run_post_signup_actions(services, signup_result)
             if not post_result.ok:
                 self._fail(post_result, thread_id, attempt_no, email)
                 break
+            self._mark_stage_success(post_result.stage)
 
             self._record_success(
                 post_result.data["sso"],
@@ -366,6 +422,7 @@ class GrokRunner:
                         self._fail(identity, thread_id, attempt_no)
                         time.sleep(5)
                         continue
+                    self._mark_stage_success(identity.stage)
                     current_email = identity.data["email"]
                     success = self._complete_registration_attempt(
                         session,
@@ -411,10 +468,12 @@ class GrokRunner:
         self._log("info", "startup", f"当前代理: {self.cfg.proxies.get('https') if self.cfg.proxies else '直连'}")
         self._log("info", "startup", f"成功后保留邮箱: {'ON' if self.cfg.keep_success_email else 'OFF'}")
         self._log("info", "startup", f"NSFW 开关: {'ON' if self.cfg.enable_nsfw else 'OFF'}")
+        self._log("info", "startup", f"SSO 输出策略: {getattr(self.cfg, 'sso_output_mode', 'plain').upper()}")
         boot = self.scan_bootstrap()
         if not boot.ok:
             self._fail(boot, thread_id=0, attempt_no=0)
             return 1
+        self._mark_stage_success(boot.stage)
         self._log("info", "scan_bootstrap", f"Action ID: {self.runtime.action_id}", latency_ms=boot.latency_ms)
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.cfg.thread_count) as executor:
             futures = [executor.submit(self.worker, index + 1) for index in range(self.cfg.thread_count)]
@@ -432,4 +491,11 @@ class GrokRunner:
             self._log("info", "summary", f"failure_bucket {key}={value}")
         if self.stop.stop_reason == StopReason.ATTEMPT_LIMIT and self.stop.success_count < self.stop.target_count:
             self._log("warning", "summary", "已达到最大尝试上限，提前停止。 [ATTEMPT_LIMIT_REACHED]", error_type=ErrorType.POLICY.value)
+        if self.stop.stop_reason == StopReason.STAGE_FAILURE:
+            self._log(
+                "warning",
+                "summary",
+                f"阶段连续失败触发熔断，提前停止。 [STAGE_FAILURE_STOPPED] stage={self.stage_failure_stop_stage or 'unknown'}",
+                error_type=ErrorType.POLICY.value,
+            )
         return 0 if self.stop.success_count >= self.stop.target_count else 1

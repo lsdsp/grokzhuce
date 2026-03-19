@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Optional, Dict, Any
 
 from curl_cffi import requests
-from .proxy_utils import build_requests_proxies
+from .http_client_policy import build_impersonated_request_kwargs
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -17,11 +17,7 @@ class UserAgreementService:
 
     def __init__(self, cf_clearance: str = "", proxy_url: str = ""):
         self.cf_clearance = (cf_clearance or "").strip()
-        if proxy_url and proxy_url.strip():
-            proxy = proxy_url.strip()
-            self.proxies = {"http": proxy, "https": proxy}
-        else:
-            self.proxies = build_requests_proxies(preferred_keys=("GROK_PROXY_URL",))
+        self.proxy_url = (proxy_url or "").strip()
 
     def accept_tos_version(
         self,
@@ -84,14 +80,18 @@ class UserAgreementService:
         )
 
         try:
+            request_kwargs = build_impersonated_request_kwargs(
+                preferred_proxy_keys=("GROK_PROXY_URL",),
+                explicit_proxy_url=self.proxy_url,
+                impersonate=impersonate,
+                timeout=timeout,
+            )
             response = requests.post(
                 url,
                 headers=headers,
                 cookies=cookies,
                 data=data,
-                impersonate=impersonate or "chrome120",
-                timeout=timeout,
-                proxies=self.proxies or None,
+                **request_kwargs,
             )
             hex_reply = response.content.hex()
             grpc_status = response.headers.get("grpc-status")

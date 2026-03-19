@@ -5,6 +5,15 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+DIAGNOSTIC_FIELDS = (
+    "failure_reason",
+    "failed_stage",
+    "browser_index",
+    "proxy",
+    "browser_name",
+    "browser_version",
+)
+
 
 class InMemorySolverResultStore:
     def __init__(self):
@@ -102,10 +111,31 @@ class SQLiteSolverResultStore:
                 sitekey TEXT,
                 action TEXT,
                 cdata TEXT,
-                elapsed_time REAL
+                elapsed_time REAL,
+                failure_reason TEXT,
+                failed_stage TEXT,
+                browser_index INTEGER,
+                proxy TEXT,
+                browser_name TEXT,
+                browser_version TEXT
             )
             """
         )
+        existing_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(solver_results)").fetchall()
+        }
+        alter_statements = {
+            "failure_reason": "ALTER TABLE solver_results ADD COLUMN failure_reason TEXT",
+            "failed_stage": "ALTER TABLE solver_results ADD COLUMN failed_stage TEXT",
+            "browser_index": "ALTER TABLE solver_results ADD COLUMN browser_index INTEGER",
+            "proxy": "ALTER TABLE solver_results ADD COLUMN proxy TEXT",
+            "browser_name": "ALTER TABLE solver_results ADD COLUMN browser_name TEXT",
+            "browser_version": "ALTER TABLE solver_results ADD COLUMN browser_version TEXT",
+        }
+        for column_name, statement in alter_statements.items():
+            if column_name not in existing_columns:
+                conn.execute(statement)
         conn.commit()
 
     async def init(self):
@@ -117,7 +147,8 @@ class SQLiteSolverResultStore:
         conn = self._ensure_connection()
         row = conn.execute(
             """
-            SELECT task_id, task_type, create_time, updated_time, value, status, url, sitekey, action, cdata, elapsed_time
+            SELECT task_id, task_type, create_time, updated_time, value, status, url, sitekey, action, cdata, elapsed_time,
+                   failure_reason, failed_stage, browser_index, proxy, browser_name, browser_version
             FROM solver_results
             WHERE task_id = ?
             """,
@@ -131,7 +162,7 @@ class SQLiteSolverResultStore:
             "createTime": row["create_time"],
             "updatedTime": row["updated_time"],
         }
-        for key in ("value", "status", "url", "sitekey", "action", "cdata", "elapsed_time"):
+        for key in ("value", "status", "url", "sitekey", "action", "cdata", "elapsed_time", *DIAGNOSTIC_FIELDS):
             value = row[key]
             if value is not None:
                 result[key] = value
@@ -149,8 +180,9 @@ class SQLiteSolverResultStore:
         conn.execute(
             """
             INSERT INTO solver_results (
-                task_id, task_type, create_time, updated_time, value, status, url, sitekey, action, cdata, elapsed_time
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                task_id, task_type, create_time, updated_time, value, status, url, sitekey, action, cdata, elapsed_time,
+                failure_reason, failed_stage, browser_index, proxy, browser_name, browser_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 task_type=excluded.task_type,
                 create_time=excluded.create_time,
@@ -161,7 +193,13 @@ class SQLiteSolverResultStore:
                 sitekey=excluded.sitekey,
                 action=excluded.action,
                 cdata=excluded.cdata,
-                elapsed_time=excluded.elapsed_time
+                elapsed_time=excluded.elapsed_time,
+                failure_reason=excluded.failure_reason,
+                failed_stage=excluded.failed_stage,
+                browser_index=excluded.browser_index,
+                proxy=excluded.proxy,
+                browser_name=excluded.browser_name,
+                browser_version=excluded.browser_version
             """,
             (
                 task_id,
@@ -175,6 +213,12 @@ class SQLiteSolverResultStore:
                 merged.get("action"),
                 merged.get("cdata"),
                 merged.get("elapsed_time"),
+                merged.get("failure_reason"),
+                merged.get("failed_stage"),
+                merged.get("browser_index"),
+                merged.get("proxy"),
+                merged.get("browser_name"),
+                merged.get("browser_version"),
             ),
         )
         conn.commit()

@@ -7,6 +7,7 @@ import requests
 from urllib.parse import urlencode
 
 from grok_runtime import LOGGER
+from .http_client_policy import create_local_session
 
 
 class TurnstileService:
@@ -25,8 +26,7 @@ class TurnstileService:
         self.solver_url = solver_url
         self.yescaptcha_api = "https://api.yescaptcha.com"
         # 本地 solver 访问不应被系统代理接管，否则 127.0.0.1 请求会被错误转发。
-        self.local_session = requests.Session()
-        self.local_session.trust_env = False
+        self.local_session = create_local_session(requests.Session)
 
     def create_task(self, siteurl, sitekey):
         """

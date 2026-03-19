@@ -101,6 +101,8 @@ Copy-Item .env.example .env
 | SOLVER_RESULT_DB_PATH | SQLite 后端数据库路径（可选，默认 `logs/solver/solver-results.sqlite3`） |
 | GROK_PROXY_URL | Grok 主流程代理（可选） |
 | KEEP_SUCCESS_EMAIL | 注册成功后是否保留邮箱（可选，`true/false`，默认 `false`） |
+| SSO_OUTPUT_MODE | 成功 token 输出策略（可选，`plain/masked/disabled/encrypted`，默认 `plain`） |
+| SSO_ENCRYPTION_PASSPHRASE | 当 `SSO_OUTPUT_MODE=encrypted` 时使用的加密口令 |
 | ENABLE_NSFW | 是否开启 NSFW/Unhinged（可选，`true/false`，默认 `true`） |
 | NSFW_TIMEOUT | NSFW 后置请求超时秒数（可选，默认 `20`） |
 | NSFW_RETRY_ATTEMPTS | NSFW 后置请求重试次数（可选，默认 `2`） |
@@ -147,7 +149,12 @@ python grok.py --threads 3 --count 30 --max-attempts 120
 未传 `--max-attempts` 时，默认按 `max(count*4, count+10)` 自动计算。
 可选追加 `--metrics-file` 指定结构化日志输出路径（默认 `logs/grok/metrics.<timestamp>.jsonl`）。
 
-注册成功的 SSO Token 保存在 `keys/grok_时间戳_数量.txt`
+注册成功的 SSO Token 输出受 `SSO_OUTPUT_MODE` 控制：
+
+- `plain`：原样写入 `keys/grok_时间戳_数量.txt`
+- `masked`：按脱敏形式写入文件，便于对账但不暴露完整 token
+- `disabled`：不写入 token 文件内容（文件仍会创建，内容为空）
+- `encrypted`：使用 `SSO_ENCRYPTION_PASSPHRASE` 加密后写入文件，文件中每行是单独的加密载荷
 
 ### 一键启动（推荐）
 

@@ -10,7 +10,7 @@ from typing import Optional, Dict, Any, Tuple
 from urllib.parse import urlparse
 
 from curl_cffi import requests
-from .proxy_utils import build_requests_proxies
+from .http_client_policy import build_impersonated_request_kwargs, build_proxy_mapping
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -49,11 +49,11 @@ class NsfwSettingsService:
 
     def __init__(self, cf_clearance: str = "", proxy_url: str = ""):
         self.cf_clearance = (cf_clearance or "").strip()
-        if proxy_url and proxy_url.strip():
-            proxy = proxy_url.strip()
-            self.proxies = {"http": proxy, "https": proxy}
-        else:
-            self.proxies = build_requests_proxies(preferred_keys=("GROK_PROXY_URL",))
+        self.proxy_url = (proxy_url or "").strip()
+        self.proxies = build_proxy_mapping(
+            explicit_proxy_url=self.proxy_url,
+            preferred_proxy_keys=("GROK_PROXY_URL",),
+        )
         self._unhinged_checked = False
         self._unhinged_supported_key: Optional[str] = None
         self.request_timeout = _parse_positive_int_env("NSFW_TIMEOUT", 20)
@@ -138,9 +138,12 @@ class NsfwSettingsService:
                         "headers": headers,
                         "data": data,
                         "json": json_data,
-                        "impersonate": impersonate,
-                        "timeout": timeout,
-                        "proxies": self.proxies or None,
+                        **build_impersonated_request_kwargs(
+                            preferred_proxy_keys=("GROK_PROXY_URL",),
+                            explicit_proxy_url=self.proxy_url,
+                            impersonate=impersonate,
+                            timeout=timeout,
+                        ),
                     }
                     if cookies:
                         kwargs["cookies"] = cookies

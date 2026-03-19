@@ -30,6 +30,17 @@ class GrokStopPolicyTests(unittest.TestCase):
         self.assertTrue(policy.should_stop())
         self.assertEqual(policy.stop_reason, grok.StopReason.TARGET_REACHED)
 
+    def test_stop_marks_policy_with_explicit_reason(self):
+        policy = grok.StopPolicy(target_count=2, max_attempts=10)
+
+        policy.stop(grok.StopReason.STAGE_FAILURE)
+        claim = policy.claim_attempt_slot()
+
+        self.assertTrue(policy.should_stop())
+        self.assertEqual(policy.stop_reason, grok.StopReason.STAGE_FAILURE)
+        self.assertFalse(claim.allowed)
+        self.assertEqual(claim.reason, grok.StopReason.STAGE_FAILURE)
+
     def test_jsonl_logger_writes_json_line(self):
         with tempfile.TemporaryDirectory() as td:
             path = os.path.join(td, "metrics.jsonl")

@@ -10,13 +10,14 @@ from rich.panel import Panel
 from rich.text import Text
 
 from solver_browser_pool import BrowserPoolManager
-from solver_logging import COLORS, get_solver_logger
+from solver_logging import COLORS, get_solver_event_logger, get_solver_logger
 from solver_page_actions import TurnstilePageActions
 from solver_result_repository import SolverResultRepository
 from solver_task_service import TurnstileTaskService
 
 
 logger = get_solver_logger()
+event_logger = get_solver_event_logger()
 
 
 class TurnstileAPIServer:
@@ -65,6 +66,7 @@ class TurnstileAPIServer:
             pool_manager=self.pool_manager,
             repository=self.repository,
             logger=logger,
+            event_logger=event_logger,
             colors=COLORS,
             debug=debug,
             antishadow_inject=self.page_actions.antishadow_inject,

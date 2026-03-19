@@ -42,6 +42,27 @@ class ApiSolverResultTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["errorId"], 1)
         self.assertEqual(payload["errorCode"], "ERROR_CAPTCHA_UNSOLVABLE")
 
+    async def test_get_result_returns_failure_diagnostics_when_available(self):
+        server = self._build_server()
+        mocked_result = {
+            "value": "CAPTCHA_FAIL",
+            "failure_reason": "proxy_parse_failed",
+            "failed_stage": "prepare_context",
+            "elapsed_time": 4.2,
+            "browser_index": 3,
+        }
+
+        with patch.object(server.repository, "load", new=AsyncMock(return_value=mocked_result)):
+            async with server.app.test_request_context("/result?id=task-3"):
+                response, status_code = await server.get_result()
+
+        payload = await response.get_json()
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["errorId"], 1)
+        self.assertEqual(payload["diagnostics"]["failure_reason"], "proxy_parse_failed")
+        self.assertEqual(payload["diagnostics"]["failed_stage"], "prepare_context")
+        self.assertEqual(payload["diagnostics"]["browser_index"], 3)
+
     async def test_return_or_replace_browser_requeues_connected_browser(self):
         server = self._build_server()
         browser = Mock()

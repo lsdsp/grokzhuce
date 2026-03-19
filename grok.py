@@ -1,16 +1,15 @@
 import argparse
 import os
-import threading
-import time
+import sys
+import types
 
 from grok_env import load_project_env
 
 load_project_env()
 
+import grok_compat
 from grok_config import (
-    DEFAULT_SITE_KEY,
     DEFAULT_SITE_URL,
-    DEFAULT_STATE_TREE,
     ENABLE_NSFW,
     KEEP_SUCCESS_EMAIL,
     PROXIES,
@@ -57,30 +56,20 @@ __all__ = [
 
 
 site_url = DEFAULT_SITE_URL
-config = {
-    "site_key": DEFAULT_SITE_KEY,
-    "action_id": None,
-    "state_tree": DEFAULT_STATE_TREE,
+_COMPAT_ATTRS = {
+    "config",
+    "success_count",
+    "attempt_count",
+    "target_count",
+    "max_attempts",
+    "stop_event",
+    "attempt_limit_reached",
+    "output_file",
 }
-
-# compatibility globals; runtime logic now lives in StopPolicy/GrokRunner
-success_count = 0
-attempt_count = 0
-start_time = time.time()
-target_count = 100
-max_attempts = 0
-stop_event = threading.Event()
-attempt_limit_reached = threading.Event()
-output_file = None
 
 
 def reset_runtime_state():
-    global success_count, attempt_count, start_time
-    success_count = 0
-    attempt_count = 0
-    start_time = time.time()
-    stop_event.clear()
-    attempt_limit_reached.clear()
+    grok_compat.reset_state()
 
 
 def register_single_thread():
@@ -108,21 +97,7 @@ def _read_int_with_default(prompt: str, default_value: int) -> int:
 
 
 def _sync_runner_compat_state(runner):
-    global success_count, attempt_count
-
-    config.update(
-        {
-            "site_key": runner.runtime.site_key,
-            "state_tree": runner.runtime.state_tree,
-            "action_id": runner.runtime.action_id,
-        }
-    )
-
-    success_count = runner.stop.success_count
-    attempt_count = runner.stop.attempt_count
-    if runner.stop.stop_reason == StopReason.ATTEMPT_LIMIT:
-        attempt_limit_reached.set()
-        stop_event.set()
+    grok_compat.sync_runner_state(runner)
 
 
 def main(thread_count=None, total_count=None, max_attempts_arg=None, metrics_file=None):
@@ -145,10 +120,7 @@ def main(thread_count=None, total_count=None, max_attempts_arg=None, metrics_fil
     os.makedirs("keys", exist_ok=True)
     os.makedirs("logs/grok", exist_ok=True)
 
-    global target_count, max_attempts, output_file, success_count, attempt_count
-    target_count = total
-    max_attempts = cfg.max_attempts
-    output_file = cfg.output_file
+    grok_compat.sync_main_state(target_count=total, max_attempts=cfg.max_attempts, output_file=cfg.output_file)
     reset_runtime_state()
 
     print(f"[*] 启动 {threads} 个线程，目标 {total} 个")
@@ -178,3 +150,19 @@ if __name__ == "__main__":
             metrics_file=args.metrics_file,
         )
     )
+
+
+class _GrokModule(types.ModuleType):
+    def __getattr__(self, name):
+        if name in _COMPAT_ATTRS:
+            return getattr(grok_compat.state, name)
+        return super().__getattribute__(name)
+
+    def __setattr__(self, name, value):
+        if name in _COMPAT_ATTRS:
+            setattr(grok_compat.state, name, value)
+            return
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _GrokModule

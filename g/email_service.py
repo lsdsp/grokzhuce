@@ -6,11 +6,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
-import urllib3
-from urllib3.exceptions import InsecureRequestWarning
 
 from grok_runtime import LOGGER
-from .proxy_utils import build_requests_proxies, resolve_proxy_url
+from .http_client_policy import build_plain_request_kwargs
 
 
 class EmailService:
@@ -47,29 +45,10 @@ class EmailService:
             "Content-Type": "application/json",
         }
         self.header_candidates = [self.x_api_key_headers, self.bearer_headers]
-
-        proxy_url = resolve_proxy_url(preferred_keys=("MOEMAIL_PROXY_URL", "GROK_PROXY_URL"))
-        verify_ssl_env = os.getenv("MOEMAIL_VERIFY_SSL")
-        if verify_ssl_env is None or not verify_ssl_env.strip():
-            verify_ssl = not bool(proxy_url)
-        else:
-            verify_ssl_value = verify_ssl_env.strip().lower()
-            if verify_ssl_value in {"true", "1", "yes", "on"}:
-                verify_ssl = True
-            elif verify_ssl_value in {"false", "0", "no", "off"}:
-                verify_ssl = False
-            else:
-                verify_ssl = not bool(proxy_url)
-
-        self.request_kwargs = {"verify": verify_ssl}
-        if not verify_ssl:
-            # In proxy MITM mode, verify=False is explicit; suppress repetitive warning noise.
-            urllib3.disable_warnings(InsecureRequestWarning)
-        proxy_mapping = build_requests_proxies(
-            preferred_keys=("MOEMAIL_PROXY_URL", "GROK_PROXY_URL")
+        self.request_kwargs = build_plain_request_kwargs(
+            preferred_proxy_keys=("MOEMAIL_PROXY_URL", "GROK_PROXY_URL"),
+            verify_ssl_env_key="MOEMAIL_VERIFY_SSL",
         )
-        if proxy_mapping:
-            self.request_kwargs["proxies"] = proxy_mapping
 
         self._email_id_cache: Dict[str, str] = {}
         self._email_created_at_ms: Dict[str, int] = {}
@@ -221,14 +200,15 @@ class EmailService:
         timeout: int = 15,
     ) -> Optional[requests.Response]:
         try:
+            request_kwargs = dict(self.request_kwargs)
+            request_kwargs["timeout"] = timeout
             return requests.request(
                 method=method,
                 url=f"{self.base_url}{path}",
                 headers=headers,
                 params=params,
                 json=json_data,
-                timeout=timeout,
-                **self.request_kwargs,
+                **request_kwargs,
             )
         except Exception:
             return None
@@ -368,8 +348,7 @@ class EmailService:
             return True
         return False
 
-    def create_email(self) -> Tuple[Optional[str], Optional[str]]:
-        """创建临时邮箱（保持与历史接口兼容，返回 (jwt, email)）。"""
+    def _create_address_impl(self) -> Optional[str]:
         domain = self._get_default_domain()
         payload_candidates = []
         if domain:
@@ -409,10 +388,27 @@ class EmailService:
                 if created_at_ms:
                     self._email_created_at_ms[email] = created_at_ms
 
-                return email, email
+                return email
 
         LOGGER.error("创建邮箱失败: moemail OpenAPI 返回异常")
-        return None, None
+        return None
+
+    def create_address(self) -> Optional[str]:
+        """创建临时邮箱并返回邮箱地址。"""
+        return self._create_address_impl()
+
+    def create_email(self) -> Tuple[Optional[str], Optional[str]]:
+        """
+        创建临时邮箱（兼容旧接口，返回 `(jwt_like_value, email)`）。
+
+        该服务当前没有独立 jwt 概念，历史调用方通常只使用第二个返回值；
+        因此这里继续返回 `(email, email)` 以保持兼容。
+        新代码应优先使用 `create_address()`。
+        """
+        email = self._create_address_impl()
+        if not email:
+            return None, None
+        return email, email
 
     def fetch_verification_code(
         self, email: str, max_attempts: int = 30, exclude_codes: Optional[set] = None

@@ -24,8 +24,10 @@ class SolverResultRepository:
     async def save_token(self, task_id: str, token: str, elapsed_time: float):
         await self.store.save(task_id, "turnstile", {"value": token, "elapsed_time": elapsed_time})
 
-    async def save_failure(self, task_id: str, elapsed_time: float):
-        await self.store.save(task_id, "turnstile", {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time})
+    async def save_failure(self, task_id: str, elapsed_time: float, **diagnostics):
+        payload = {"value": "CAPTCHA_FAIL", "elapsed_time": elapsed_time}
+        payload.update({key: value for key, value in diagnostics.items() if value not in (None, "")})
+        await self.store.save(task_id, "turnstile", payload)
 
     async def load(self, task_id: str):
         return await self.store.load(task_id)
@@ -44,11 +46,18 @@ class SolverResultRepository:
         if isinstance(result, dict):
             value = result.get("value")
             if value == "CAPTCHA_FAIL":
-                return {
+                payload = {
                     "errorId": 1,
                     "errorCode": "ERROR_CAPTCHA_UNSOLVABLE",
                     "errorDescription": "Workers could not solve the Captcha",
                 }
+                diagnostics = {}
+                for key in ("failure_reason", "failed_stage", "browser_index", "proxy", "elapsed_time", "browser_name", "browser_version"):
+                    if key in result and result.get(key) not in (None, ""):
+                        diagnostics[key] = result.get(key)
+                if diagnostics:
+                    payload["diagnostics"] = diagnostics
+                return payload
             if value:
                 return {
                     "errorId": 0,

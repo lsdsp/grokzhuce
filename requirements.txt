@@ -1,4 +1,5 @@
 beautifulsoup4==4.14.3
+cryptography==44.0.3
 curl_cffi==0.14.0
 patchright==1.58.0
 python-dotenv==1.2.1

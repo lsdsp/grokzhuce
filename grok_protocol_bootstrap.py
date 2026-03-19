@@ -10,25 +10,65 @@ from grok_config import DEFAULT_IMPERSONATE, DEFAULT_SITE_URL
 from grok_runtime import ErrorType, RuntimeContext, StageResult
 
 
+SITE_KEY_PATTERNS = (
+    r'sitekey":"(0x4[a-zA-Z0-9_-]+)"',
+    r'"siteKey"\s*:\s*"(0x4[a-zA-Z0-9_-]+)"',
+    r'data-sitekey=["\'](0x4[a-zA-Z0-9_-]+)["\']',
+)
+STATE_TREE_PATTERNS = (
+    r'next-router-state-tree":"([^"]+)"',
+    r'"next-router-state-tree"\s*:\s*"([^"]+)"',
+    r'<meta[^>]+name=["\']next-router-state-tree["\'][^>]+content=["\']([^"\']+)["\']',
+)
+ACTION_ID_PATTERNS = (
+    r'data-next-action=["\'](7f[a-fA-F0-9]{40})["\']',
+    r'"next-action"\s*:\s*"(7f[a-fA-F0-9]{40})"',
+    r"(7f[a-fA-F0-9]{40})",
+)
+
+
+def _find_first_match(text: str, patterns) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, text or "")
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _compact_hint(text: str, limit: int = 120) -> str:
+    normalized = re.sub(r"\s+", " ", text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit] + "..."
+
+
 def extract_signup_bootstrap(*, html: str, js_bodies: Sequence[str], runtime: RuntimeContext) -> StageResult:
     normalized_html = html.replace('\\"', '"')
 
-    site_key_match = re.search(r'sitekey":"(0x4[a-zA-Z0-9_-]+)"', normalized_html)
-    if site_key_match:
-        runtime.site_key = site_key_match.group(1)
+    site_key = _find_first_match(normalized_html, SITE_KEY_PATTERNS)
+    if site_key:
+        runtime.site_key = site_key
 
-    state_tree_match = re.search(r'next-router-state-tree":"([^"]+)"', normalized_html)
-    if state_tree_match:
-        runtime.state_tree = state_tree_match.group(1)
+    state_tree = _find_first_match(normalized_html, STATE_TREE_PATTERNS)
+    if state_tree:
+        runtime.state_tree = state_tree
 
-    for js_body in js_bodies:
-        action_match = re.search(r"7f[a-fA-F0-9]{40}", js_body)
-        if action_match:
-            runtime.action_id = action_match.group(0)
+    for source_text in (normalized_html, *js_bodies):
+        action_id = _find_first_match(source_text, ACTION_ID_PATTERNS)
+        if action_id:
+            runtime.action_id = action_id
             break
 
     if not runtime.action_id:
-        return StageResult(False, "scan_bootstrap", ErrorType.PARSE, False, "未找到 Action ID")
+        html_hint = _compact_hint(normalized_html)
+        js_hint = _compact_hint(" | ".join(js_bodies[:2]))
+        return StageResult(
+            False,
+            "scan_bootstrap",
+            ErrorType.PARSE,
+            False,
+            f"未找到 Action ID | html_hint={html_hint} | js_hint={js_hint}",
+        )
     return StageResult(True, "scan_bootstrap")
 
 

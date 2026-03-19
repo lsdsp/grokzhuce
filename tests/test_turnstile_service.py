@@ -101,6 +101,7 @@ class TurnstileServiceYesCaptchaTests(unittest.TestCase):
 
         self.assertEqual(task_id, "task-yes-1")
         self.assertEqual(post_mock.call_args.kwargs["timeout"], service.YESCAPTCHA_TIMEOUT)
+        self.assertNotIn("proxies", post_mock.call_args.kwargs)
 
     def test_get_response_with_yescaptcha_uses_timeout(self):
         with patch.dict("os.environ", {"YESCAPTCHA_KEY": "yes-test-key"}, clear=False):
@@ -116,6 +117,7 @@ class TurnstileServiceYesCaptchaTests(unittest.TestCase):
 
         self.assertEqual(token, "token-yes")
         self.assertEqual(post_mock.call_args.kwargs["timeout"], service.YESCAPTCHA_TIMEOUT)
+        self.assertNotIn("proxies", post_mock.call_args.kwargs)
 
     def test_get_response_logs_yescaptcha_errors_instead_of_printing(self):
         with patch.dict("os.environ", {"YESCAPTCHA_KEY": "yes-test-key"}, clear=False):

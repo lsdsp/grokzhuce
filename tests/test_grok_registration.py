@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from grok_crypto import decrypt_sso_value
 from grok_registration import GrokRunner
 from grok_runtime import AppConfig, AttemptClaim, ErrorType, RuntimeContext, StageResult, StopReason
 
@@ -33,7 +34,16 @@ class _InlineExecutor:
 
 
 class GrokRegistrationTests(unittest.TestCase):
-    def _build_runner(self, *, target_count=1, max_attempts=2, enable_nsfw=False):
+    def _build_runner(
+        self,
+        *,
+        target_count=1,
+        max_attempts=2,
+        enable_nsfw=False,
+        stage_failure_threshold=20,
+        sso_output_mode="plain",
+        sso_encryption_passphrase="",
+    ):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         root = Path(temp_dir.name)
@@ -46,6 +56,9 @@ class GrokRegistrationTests(unittest.TestCase):
             output_file=str(root / "keys.txt"),
             proxies={},
             metrics_path=str(root / "metrics.jsonl"),
+            stage_failure_threshold=stage_failure_threshold,
+            sso_output_mode=sso_output_mode,
+            sso_encryption_passphrase=sso_encryption_passphrase,
         )
         runtime = RuntimeContext(site_key="site-key", action_id="action-id", state_tree="state-tree")
         return GrokRunner(cfg, runtime=runtime, site_url="https://accounts.x.ai")
@@ -184,6 +197,75 @@ class GrokRegistrationTests(unittest.TestCase):
         self.assertIn("NSFW: SKIP", message)
         self.assertIn("grpc=13", message)
         self.assertIn("endpoint=https://grok.com/auth_mgmt.AuthManagement/UpdateUserFeatureControls", message)
+
+    def test_fail_stops_runner_when_same_stage_reaches_threshold(self):
+        runner = self._build_runner(stage_failure_threshold=3)
+        result = StageResult(False, "request_code", ErrorType.TIMEOUT, True, "未收到验证码")
+
+        with patch.object(runner, "_log"):
+            runner._fail(result, thread_id=1, attempt_no=1, email="demo@example.com")
+            runner._fail(result, thread_id=1, attempt_no=2, email="demo@example.com")
+            runner._fail(result, thread_id=1, attempt_no=3, email="demo@example.com")
+
+        self.assertTrue(runner.stop.should_stop())
+        self.assertEqual(runner.stop.stop_reason, StopReason.STAGE_FAILURE)
+        self.assertEqual(runner.stage_failures["request_code"], 3)
+
+    def test_mark_stage_success_resets_failure_counter(self):
+        runner = self._build_runner(stage_failure_threshold=2)
+        result = StageResult(False, "request_code", ErrorType.TIMEOUT, True, "未收到验证码")
+
+        with patch.object(runner, "_log"):
+            runner._fail(result, thread_id=1, attempt_no=1, email="demo@example.com")
+        runner._mark_stage_success("request_code")
+        with patch.object(runner, "_log"):
+            runner._fail(result, thread_id=1, attempt_no=2, email="demo@example.com")
+
+        self.assertFalse(runner.stop.should_stop())
+        self.assertEqual(runner.stage_failures["request_code"], 1)
+
+    def test_record_success_masks_sso_when_output_mode_is_masked(self):
+        runner = self._build_runner(sso_output_mode="masked")
+
+        with patch.object(runner.stop, "mark_success", return_value=1), patch("grok_registration.time.time", return_value=100.0), patch.object(
+            runner, "_log"
+        ):
+            runner._record_success("sso-token-abcdef123456", "demo@example.com", thread_id=1, attempt_no=2, nsfw_tag="OFF")
+
+        content = Path(runner.cfg.output_file).read_text(encoding="utf-8").strip()
+        self.assertNotEqual(content, "sso-token-abcdef123456")
+        self.assertTrue(content.startswith("sso-"))
+        self.assertIn("*", content)
+
+    def test_record_success_skips_sso_file_write_when_output_mode_is_disabled(self):
+        runner = self._build_runner(sso_output_mode="disabled")
+
+        with patch.object(runner.stop, "mark_success", return_value=1), patch("grok_registration.time.time", return_value=100.0), patch.object(
+            runner, "_log"
+        ):
+            runner._record_success("sso-token-abcdef123456", "demo@example.com", thread_id=1, attempt_no=2, nsfw_tag="OFF")
+
+        content = Path(runner.cfg.output_file).read_text(encoding="utf-8")
+        self.assertEqual(content, "")
+
+    def test_record_success_encrypts_sso_when_output_mode_is_encrypted(self):
+        runner = self._build_runner(
+            sso_output_mode="encrypted",
+            sso_encryption_passphrase="correct horse battery staple",
+        )
+
+        with patch.object(runner.stop, "mark_success", return_value=1), patch("grok_registration.time.time", return_value=100.0), patch.object(
+            runner, "_log"
+        ):
+            runner._record_success("sso-token-abcdef123456", "demo@example.com", thread_id=1, attempt_no=2, nsfw_tag="OFF")
+
+        content = Path(runner.cfg.output_file).read_text(encoding="utf-8").strip()
+        self.assertNotEqual(content, "sso-token-abcdef123456")
+        self.assertTrue(content.startswith("enc-v1:"))
+        self.assertEqual(
+            decrypt_sso_value(content, "correct horse battery staple"),
+            "sso-token-abcdef123456",
+        )
 
 
 if __name__ == "__main__":
