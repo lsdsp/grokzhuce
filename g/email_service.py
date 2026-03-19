@@ -10,6 +10,8 @@ import requests
 import urllib3
 from dotenv import load_dotenv
 from urllib3.exceptions import InsecureRequestWarning
+
+from grok_runtime import LOGGER
 from .proxy_utils import build_requests_proxies, resolve_proxy_url
 
 
@@ -412,7 +414,7 @@ class EmailService:
 
                 return email, email
 
-        print("[-] 创建邮箱失败: moemail OpenAPI 返回异常")
+        LOGGER.error("创建邮箱失败: moemail OpenAPI 返回异常")
         return None, None
 
     def fetch_verification_code(

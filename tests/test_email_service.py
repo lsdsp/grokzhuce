@@ -184,6 +184,18 @@ class EmailServiceOpenApiFlowTests(unittest.TestCase):
         self.assertTrue(captured_json)
         self.assertEqual(captured_json[0].get("expiryTime"), EmailService.DEFAULT_EMAIL_EXPIRY_MS)
 
+    def test_create_email_logs_when_all_openapi_attempts_fail(self):
+        service = self._new_service()
+
+        with patch("g.email_service.requests.request", return_value=self._fake_response(500, {})), patch(
+            "g.email_service.LOGGER"
+        ) as logger_mock:
+            jwt_token, email = service.create_email()
+
+        self.assertIsNone(jwt_token)
+        self.assertIsNone(email)
+        logger_mock.error.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()
