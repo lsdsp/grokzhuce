@@ -112,6 +112,34 @@ class GrokProtocolTests(unittest.TestCase):
         self.assertIn("html_hint", result.details)
         self.assertIn("js_hint", result.details)
 
+    def test_extract_signup_bootstrap_prefers_js_action_id_over_generic_html_hash(self):
+        from grok_protocol import extract_signup_bootstrap
+
+        runtime = RuntimeContext(
+            site_key="0x4AAAAAAAhr9JGVDZbrZOo0",
+            action_id=None,
+            state_tree="fallback",
+        )
+        html = """
+        <html>
+          <body>
+            <div data-next-action="7faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"></div>
+          </body>
+        </html>
+        """
+        js_bodies = [
+            'self.__next_f.push([1,"7fbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])',
+        ]
+
+        result = extract_signup_bootstrap(
+            html=html,
+            js_bodies=js_bodies,
+            runtime=runtime,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(runtime.action_id, "7fbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
 
 if __name__ == "__main__":
     unittest.main()

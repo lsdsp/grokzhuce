@@ -125,7 +125,8 @@ class StopPolicy:
 
     def stop(self, reason: StopReason):
         with self._lock:
-            self.stop_reason = reason
+            if self.stop_reason is None:
+                self.stop_reason = reason
             self.stop_event.set()
 
     def should_stop(self) -> bool:

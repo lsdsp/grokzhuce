@@ -53,11 +53,15 @@ def extract_signup_bootstrap(*, html: str, js_bodies: Sequence[str], runtime: Ru
     if state_tree:
         runtime.state_tree = state_tree
 
-    for source_text in (normalized_html, *js_bodies):
+    for source_text in js_bodies:
         action_id = _find_first_match(source_text, ACTION_ID_PATTERNS)
         if action_id:
             runtime.action_id = action_id
             break
+    if not runtime.action_id:
+        action_id = _find_first_match(normalized_html, ACTION_ID_PATTERNS)
+        if action_id:
+            runtime.action_id = action_id
 
     if not runtime.action_id:
         html_hint = _compact_hint(normalized_html)
