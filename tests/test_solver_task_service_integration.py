@@ -60,6 +60,54 @@ class _FakeBrowser:
 
 
 class SolverTaskServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_enqueue_task_ignores_event_logger_failures(self):
+        repository = SolverResultRepository(store=InMemorySolverResultStore())
+        await repository.init()
+
+        pool_manager = Mock()
+        pool_manager.proxy_support = False
+        pool_manager.browser_type = "camoufox"
+        pool_manager.base_dir = "."
+        pool_manager.browser_pool = asyncio.Queue()
+        pool_manager.return_or_replace_browser = AsyncMock()
+        pool_manager.spawn_browser_for_config = AsyncMock()
+
+        event_logger = Mock()
+        event_logger.event.side_effect = RuntimeError("disk full")
+
+        service = TurnstileTaskService(
+            pool_manager=pool_manager,
+            repository=repository,
+            logger=Mock(),
+            event_logger=event_logger,
+            colors={"MAGENTA": "", "RESET": "", "GREEN": "", "RED": ""},
+            debug=False,
+            antishadow_inject=AsyncMock(),
+            block_rendering=AsyncMock(),
+            unblock_rendering=AsyncMock(),
+            inject_captcha_directly=AsyncMock(),
+            try_click_strategies=AsyncMock(return_value=True),
+        )
+        service.solve_turnstile = AsyncMock()
+
+        created_tasks = []
+        original_create_task = asyncio.create_task
+
+        def _capture_task(coro):
+            task = original_create_task(coro)
+            created_tasks.append(task)
+            return task
+
+        with patch("solver_task_service.asyncio.create_task", side_effect=_capture_task):
+            task_id = await service.enqueue_task(url="https://example.com", sitekey="site-key")
+            self.assertTrue(task_id)
+            self.assertEqual(len(created_tasks), 1)
+            await created_tasks[0]
+
+        pending = await repository.load(task_id)
+        self.assertEqual(pending["status"], "CAPTCHA_NOT_READY")
+        service.solve_turnstile.assert_awaited_once()
+
     async def test_enqueue_solve_and_read_result_payload(self):
         repository = SolverResultRepository(store=InMemorySolverResultStore())
         await repository.init()
@@ -223,6 +271,48 @@ class SolverTaskServiceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failure_call.kwargs["task_id"], "task-failure")
         self.assertEqual(failure_call.kwargs["error_type"], "captcha")
         self.assertEqual(failure_call.kwargs["failed_stage"], "navigate")
+
+    async def test_solve_success_ignores_event_logger_failures(self):
+        repository = SolverResultRepository(store=InMemorySolverResultStore())
+        await repository.init()
+
+        pool_manager = Mock()
+        pool_manager.proxy_support = False
+        pool_manager.browser_type = "camoufox"
+        pool_manager.base_dir = "."
+        pool_manager.browser_pool = asyncio.Queue()
+        await pool_manager.browser_pool.put(
+            (1, _FakeBrowser(), {"useragent": "ua-test", "sec_ch_ua": "", "browser_name": "camoufox", "browser_version": "custom"})
+        )
+        pool_manager.return_or_replace_browser = AsyncMock()
+        pool_manager.spawn_browser_for_config = AsyncMock()
+
+        event_logger = Mock()
+        event_logger.event.side_effect = RuntimeError("metrics path unavailable")
+        logger = Mock()
+
+        service = TurnstileTaskService(
+            pool_manager=pool_manager,
+            repository=repository,
+            logger=logger,
+            event_logger=event_logger,
+            colors={"MAGENTA": "", "RESET": "", "GREEN": "", "RED": ""},
+            debug=False,
+            antishadow_inject=AsyncMock(),
+            block_rendering=AsyncMock(),
+            unblock_rendering=AsyncMock(),
+            inject_captcha_directly=AsyncMock(),
+            try_click_strategies=AsyncMock(return_value=True),
+        )
+
+        with patch("solver_task_service.asyncio.sleep", new=AsyncMock()):
+            await service.solve_turnstile(task_id="task-event-fail-success", url="https://example.com", sitekey="site-key")
+
+        payload = await service.get_result_payload("task-event-fail-success")
+        self.assertEqual(payload["errorId"], 0)
+        self.assertEqual(payload["status"], "ready")
+        self.assertEqual(payload["solution"]["token"], "token-from-fake-page")
+        pool_manager.return_or_replace_browser.assert_awaited_once()
 
     async def test_save_failure_redacts_proxy_before_emitting_structured_event(self):
         repository = SolverResultRepository(store=InMemorySolverResultStore())

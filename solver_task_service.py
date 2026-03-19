@@ -66,7 +66,13 @@ class TurnstileTaskService:
         if self.event_logger is None:
             return
         clean_fields = {key: value for key, value in fields.items() if value not in (None, "")}
-        self.event_logger.event(level, stage, message, **clean_fields)
+        try:
+            self.event_logger.event(level, stage, message, **clean_fields)
+        except Exception as exc:
+            try:
+                self.logger.warning(f"solver event logging failed at {stage}: {exc}")
+            except Exception:
+                pass
 
     async def _save_failure(self, task_id: str, *, elapsed_time: float, failed_stage: str, failure_reason, browser_index=None, proxy=None, browser_config=None):
         normalized_reason = self._normalize_failure_reason(failure_reason)
