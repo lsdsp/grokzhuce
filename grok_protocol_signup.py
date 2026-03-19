@@ -11,7 +11,11 @@ SIGNUP_RETRY_PER_CODE = 3
 
 def extract_set_cookie_redirect_url(response_text: str) -> str:
     match = re.search(r'(https://[^"\s]+set-cookie\?q=[^"\s}]+)', response_text or "")
-    return match.group(1) if match else ""
+    if not match:
+        return ""
+
+    redirect_url = match.group(1)
+    return re.sub(r"[0-9]:$", "", redirect_url)
 
 
 def attempt_signup(

@@ -2,10 +2,20 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from grok_protocol_signup import attempt_signup
+from grok_protocol_signup import attempt_signup, extract_set_cookie_redirect_url
 
 
 class SignupAdapterTests(unittest.TestCase):
+    def test_extract_set_cookie_redirect_url_trims_stream_frame_suffix(self):
+        response_text = '0:["$","$L1",null,"https://accounts.x.ai/set-cookie?q=abc1231:"]'
+
+        redirect_url = extract_set_cookie_redirect_url(response_text)
+
+        self.assertEqual(
+            redirect_url,
+            "https://accounts.x.ai/set-cookie?q=abc123",
+        )
+
     def test_attempt_signup_returns_code_invalid_when_body_contains_invalid_code_marker(self):
         session = Mock()
         session.cookies.get.return_value = ""
@@ -68,7 +78,11 @@ class SignupAdapterTests(unittest.TestCase):
         self.assertEqual(result.data["sso_rw"], "sso-rw-token")
         self.assertEqual(result.data["impersonate"], "chrome120")
         self.assertEqual(result.data["user_agent"], "ua-test")
-        session.get.assert_called_once()
+        session.get.assert_called_once_with(
+            "https://accounts.x.ai/set-cookie?q=abc123",
+            allow_redirects=True,
+            timeout=30,
+        )
 
 
 if __name__ == "__main__":
